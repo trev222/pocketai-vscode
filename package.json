@@ -1,0 +1,262 @@
+{
+  "name": "pocketai-vscode",
+  "publisher": "trevorwood",
+  "private": true,
+  "version": "1.0.16",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trev222/pocketai-vscode"
+  },
+  "displayName": "PocketAI",
+  "description": "Use the local PocketAI desktop app from VS Code.",
+  "main": "./dist/extension.js",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pocketai-activitybar",
+          "title": "PocketAI",
+          "icon": "media/pocketai-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "pocketai-activitybar": [
+        {
+          "id": "pocketai.sidebarView",
+          "name": "PocketAI",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "pocketai.openPanel",
+        "title": "Open PocketAI Tab",
+        "icon": {
+          "light": "media/logo-black2-zoom.png",
+          "dark": "media/logo-black2-zoom.png"
+        }
+      },
+      {
+        "command": "pocketai.focus",
+        "title": "Open PocketAI Chat",
+        "icon": {
+          "light": "media/logo-black2-zoom.png",
+          "dark": "media/logo-black2-zoom.png"
+        }
+      },
+      {
+        "command": "pocketai.askSelection",
+        "title": "PocketAI: Ask Selection",
+        "icon": {
+          "light": "media/pocketai-selection.svg",
+          "dark": "media/pocketai-selection.svg"
+        }
+      },
+      {
+        "command": "pocketai.askPrompt",
+        "title": "Ask PocketAI",
+        "icon": {
+          "light": "media/pocketai-command.svg",
+          "dark": "media/pocketai-command.svg"
+        }
+      },
+      {
+        "command": "pocketai.focusInput",
+        "title": "PocketAI: Focus Chat Input"
+      },
+      {
+        "command": "pocketai.sendSelection",
+        "title": "PocketAI: Send Selection to Chat"
+      },
+      {
+        "command": "pocketai.acceptInlineChange",
+        "title": "PocketAI: Accept Inline Change"
+      },
+      {
+        "command": "pocketai.rejectInlineChange",
+        "title": "PocketAI: Reject Inline Change"
+      },
+      {
+        "command": "pocketai.acceptAllInlineChanges",
+        "title": "PocketAI: Accept All Inline Changes"
+      },
+      {
+        "command": "pocketai.rejectAllInlineChanges",
+        "title": "PocketAI: Reject All Inline Changes"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "pocketai.focusInput",
+        "key": "ctrl+l",
+        "mac": "cmd+l"
+      },
+      {
+        "command": "pocketai.sendSelection",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "PocketAI",
+      "properties": {
+        "pocketai.endpoints": {
+          "type": "array",
+          "default": [{ "name": "Local PocketAI", "url": "http://127.0.0.1:11434", "model": "", "maxTokens": 4096, "systemPrompt": "You are a concise coding assistant inside VS Code." }],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Display name for this endpoint." },
+              "url": { "type": "string", "description": "Base URL for the PocketAI server." },
+              "model": { "type": "string", "default": "", "description": "Model ID to use with this endpoint. Leave empty to auto-detect." },
+              "maxTokens": { "type": "number", "default": 4096, "minimum": 128, "description": "Maximum completion tokens per reply for this endpoint." },
+              "systemPrompt": { "type": "string", "default": "You are a concise coding assistant inside VS Code.", "description": "System prompt for this endpoint." }
+            }
+          },
+          "description": "List of PocketAI server endpoints with per-endpoint model, token, and prompt settings."
+        },
+        "pocketai.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "(Deprecated — use pocketai.endpoints instead) Base URL for the local PocketAI desktop app.",
+          "deprecationMessage": "Use pocketai.endpoints instead."
+        },
+        "pocketai.includeWorkspaceContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically include a bounded snapshot of the current VS Code workspace and active file with PocketAI prompts."
+        },
+        "pocketai.workspaceFileLimit": {
+          "type": "number",
+          "default": 200,
+          "minimum": 25,
+          "description": "Maximum number of workspace files to include in PocketAI's file tree snapshot."
+        },
+        "pocketai.currentFileCharLimit": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 2000,
+          "description": "Maximum number of characters from the active file to include in PocketAI context."
+        },
+        "pocketai.projectInstructionsFile": {
+          "type": "string",
+          "default": ".pocketai.md",
+          "description": "Filename for project-specific instructions loaded into every conversation's system prompt."
+        },
+        "pocketai.contextWindowSize": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 1024,
+          "description": "Context window size (in tokens) for your local model. Used by the token meter to show usage."
+        },
+        "pocketai.maxContinuations": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum number of automatic continuations when the model hits its token limit mid-response."
+        },
+        "pocketai.permissions": {
+          "type": "object",
+          "default": { "allow": [], "deny": [] },
+          "properties": {
+            "allow": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Glob patterns for auto-allowed tool calls, e.g. 'read_file(**)', 'run_command(npm run *)'"
+            },
+            "deny": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Glob patterns for denied tool calls, e.g. 'read_file(*.env)', 'run_command(rm *)'"
+            }
+          },
+          "description": "Wildcard permission rules for tool calls. Deny rules take precedence over allow rules."
+        },
+        "pocketai.useStructuredTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use OpenAI-compatible structured function calling instead of text-based tool parsing. Enable this if your model supports function calling (e.g. recent Ollama models with tool support)."
+        },
+        "pocketai.includeGitContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically include git branch and status in workspace context sent with each prompt."
+        },
+        "pocketai.includeDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically include VS Code diagnostics (errors and warnings) in workspace context sent with each prompt."
+        },
+        "pocketai.useIntegratedTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run shell commands in VS Code's integrated terminal instead of a background process. Gives visibility into command execution and preserves shell state."
+        },
+        "pocketai.mcpServers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Unique name for this MCP server." },
+              "command": { "type": "string", "description": "Command to launch the MCP server (e.g. 'npx', 'uvx', 'node')." },
+              "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments to pass to the command." },
+              "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Extra environment variables for the MCP server process." },
+              "enabled": { "type": "boolean", "default": true, "description": "Set to false to disable this server without removing it." }
+            },
+            "required": ["name", "command"]
+          },
+          "description": "MCP (Model Context Protocol) servers to connect to. Each server provides additional tools via JSON-RPC over stdio."
+        },
+        "pocketai.hooks": {
+          "type": "object",
+          "default": {},
+          "properties": {
+            "postEdit": { "type": "array", "items": { "type": "string" } },
+            "postCreate": { "type": "array", "items": { "type": "string" } },
+            "preToolUse": { "type": "array", "items": { "type": "string" } },
+            "postToolUse": { "type": "array", "items": { "type": "string" } },
+            "onSessionStart": { "type": "array", "items": { "type": "string" } },
+            "onSessionEnd": { "type": "array", "items": { "type": "string" } }
+          },
+          "description": "Shell commands to run at lifecycle points. Supports ${file}, ${tool}, ${workspaceRoot} variables."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "pocketai.openPanel",
+          "group": "navigation@-1000"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "pocketai.focus",
+          "when": "view == pocketai.sidebarView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.1",
+    "@types/vscode": "^1.96.0",
+    "typescript": "5.8.3"
+  }
+}
