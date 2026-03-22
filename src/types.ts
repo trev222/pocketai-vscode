@@ -1,21 +1,70 @@
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 export type InteractionMode = "ask" | "auto" | "plan";
 
-export type ToolCallType = "read_file" | "edit_file" | "create_file" | "web_search" | "list_files" | "run_command" | "grep" | "glob" | "git_status" | "git_diff" | "git_commit";
+export type ToolCallType =
+  | "read_file"
+  | "edit_file"
+  | "write_file"
+  | "web_search"
+  | "web_fetch"
+  | "list_files"
+  | "run_command"
+  | "grep"
+  | "glob"
+  | "git_status"
+  | "git_diff"
+  | "git_commit"
+  | "todo_write"
+  | "memory_read"
+  | "memory_write"
+  | "memory_delete";
 
 export type ToolCall = {
   id: string;
   type: ToolCallType;
   filePath: string;
+  // read_file
+  offset?: number;
+  limit?: number;
+  // edit_file
   query?: string;
   search?: string;
   replace?: string;
+  replaceAll?: boolean;
+  // write_file / create_file (legacy)
   content?: string;
+  // run_command
   command?: string;
+  description?: string;
+  timeout?: number;
+  background?: boolean;
+  // grep
   pattern?: string;
   glob?: string;
+  grepType?: string;
+  outputMode?: "content" | "files_with_matches" | "count";
+  contextLines?: number;
+  beforeLines?: number;
+  afterLines?: number;
+  caseInsensitive?: boolean;
+  multiline?: boolean;
+  headLimit?: number;
+  grepOffset?: number;
+  // glob (path scope)
+  globPath?: string;
+  // web_search / web_fetch
+  url?: string;
+  // git_commit
   commitMessage?: string;
-  background?: boolean;
+  // todo_write
+  todos?: Array<{ content: string; status: string }>;
+  // memory tools
+  memoryType?: string;
+  memoryName?: string;
+  memoryDescription?: string;
+  memoryContent?: string;
+  memoryQuery?: string;
+  // general
   status: "pending" | "approved" | "rejected" | "executed" | "error";
   result?: string;
 };

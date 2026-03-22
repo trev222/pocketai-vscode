@@ -29,6 +29,7 @@ export interface StreamingDeps {
   getActiveSystemPrompt: () => string;
   getActiveMaxTokens: () => number;
   broadcastToWebviews: (message: ExtensionToWebviewMessage) => void;
+  memoryContext?: string;
 }
 
 const STRUCTURED_TOOL_INSTRUCTIONS =
@@ -64,6 +65,7 @@ export function buildMessages(
       ? `[Project Instructions]\n${deps.projectInstructionsCache}`
       : "",
     systemPrompt || DEFAULT_SYSTEM_PROMPT,
+    deps.memoryContext || "",
     toolInstructions,
     session.mode === "auto"
       ? "When you use tool calls, they will be executed automatically without user confirmation."
@@ -415,10 +417,49 @@ export async function streamResponseWithTools(
     session.cumulativeTokens.completion += tokenUsage.completionTokens;
   }
 
-  // Warn if response was truncated — tool call arguments may be incomplete
-  if (finishReason === "length") {
+  // Handle truncated responses — try to auto-continue for content,
+  // and attempt JSON repair for incomplete tool call arguments
+  const autoContinueLimit =
+    deps.config.get<number>("maxContinuations") ?? DEFAULT_AUTO_CONTINUE_LIMIT;
+
+  if (finishReason === "length" && toolCallAccum.size === 0 && contentText) {
+    // Truncated text-only response — auto-continue using streamResponse
+    // (not recursive streamResponseWithTools, to avoid nested auto-continue loops)
     deps.outputChannel.appendLine(
-      "⚠ Structured tool response was truncated (finish_reason=length). Tool calls may be incomplete.",
+      "⚠ Structured tool response truncated (text only), auto-continuing...",
+    );
+
+    let combinedText = contentText;
+    for (let attempt = 0; attempt < autoContinueLimit; attempt++) {
+      const continueMessages: ChatMessage[] = [
+        ...messages,
+        { role: "assistant" as ChatRole, content: combinedText },
+        {
+          role: "user" as ChatRole,
+          content:
+            "Continue exactly where you left off. Do not repeat earlier text.",
+        },
+      ];
+
+      deps.broadcastToWebviews({ type: "streamStart" });
+      // Use text-only streaming for continuation — avoids recursive auto-continue
+      // and token double-counting. If the model needs tools, the tool loop will
+      // handle it on the next turn.
+      const contText = await streamResponse(
+        session,
+        continueMessages,
+        maxTokens,
+        deps,
+      );
+
+      if (!contText.trim()) break;
+      combinedText += "\n\n" + contText;
+    }
+
+    contentText = combinedText;
+  } else if (finishReason === "length" && toolCallAccum.size > 0) {
+    deps.outputChannel.appendLine(
+      "⚠ Structured tool response truncated with incomplete tool calls. Attempting JSON repair.",
     );
   }
 
@@ -438,9 +479,19 @@ export async function streamResponseWithTools(
       const tc = createToolCallFromFunction(accum.name, accum.id, args);
       toolCalls.push(tc);
     } catch {
-      deps.outputChannel.appendLine(
-        `⚠ Skipping malformed tool call: ${accum.name}(${accum.arguments.slice(0, 100)})`,
-      );
+      // Attempt JSON repair for truncated arguments
+      const repaired = tryRepairJson(accum.arguments);
+      if (repaired !== null) {
+        deps.outputChannel.appendLine(
+          `⚠ Repaired truncated JSON for tool call: ${accum.name}`,
+        );
+        const tc = createToolCallFromFunction(accum.name, accum.id, repaired);
+        toolCalls.push(tc);
+      } else {
+        deps.outputChannel.appendLine(
+          `⚠ Skipping malformed tool call: ${accum.name}(${accum.arguments.slice(0, 100)})`,
+        );
+      }
     }
   }
 
@@ -451,7 +502,8 @@ export async function streamResponseWithTools(
 function createToolCallFromFunction(
   name: string,
   id: string,
-  args: Record<string, string>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: Record<string, any>,
 ): ToolCall {
   const type = name as ToolCallType;
   const tc: ToolCall = {
@@ -468,33 +520,145 @@ function createToolCallFromFunction(
   }
 
   switch (type) {
-    case "edit_file":
-      tc.search = args.search;
-      tc.replace = args.replace;
+    case "read_file":
+      if (args.offset !== undefined) tc.offset = Number(args.offset);
+      if (args.limit !== undefined) tc.limit = Number(args.limit);
       break;
-    case "create_file":
+    case "edit_file":
+      tc.search = args.old_string || args.search;
+      tc.replace = args.new_string || args.replace;
+      if (args.replace_all) tc.replaceAll = true;
+      break;
+    case "write_file":
       tc.content = args.content;
       break;
     case "web_search":
       tc.query = args.query;
       break;
+    case "web_fetch":
+      tc.url = args.url;
+      break;
     case "run_command":
       tc.command = args.command;
+      tc.description = args.description;
+      if (args.timeout !== undefined) tc.timeout = Number(args.timeout);
       if (args.background) tc.background = true;
       break;
     case "grep":
       tc.pattern = args.pattern;
       tc.glob = args.glob;
+      tc.grepType = args.type;
+      tc.outputMode = args.output_mode;
+      if (args.context !== undefined) tc.contextLines = Number(args.context);
+      if (args.before !== undefined) tc.beforeLines = Number(args.before);
+      if (args.after !== undefined) tc.afterLines = Number(args.after);
+      if (args.case_insensitive) tc.caseInsensitive = true;
+      if (args.multiline) tc.multiline = true;
+      if (args.head_limit !== undefined) tc.headLimit = Number(args.head_limit);
+      if (args.path) tc.filePath = args.path;
       break;
     case "glob":
       tc.glob = args.pattern;
+      tc.globPath = args.path;
       break;
     case "git_commit":
       tc.commitMessage = args.message;
       break;
+    case "todo_write":
+      tc.todos = args.todos;
+      break;
+    case "memory_read":
+      tc.memoryQuery = args.query;
+      tc.memoryType = args.type;
+      break;
+    case "memory_write":
+      tc.memoryType = args.type;
+      tc.memoryName = args.name;
+      tc.memoryDescription = args.description;
+      tc.memoryContent = args.content;
+      break;
+    case "memory_delete":
+      tc.memoryName = args.name;
+      break;
   }
 
   return tc;
+}
+
+/**
+ * Attempts to repair truncated JSON from incomplete tool call arguments.
+ * Tries progressively more aggressive fixes: closing brackets/braces,
+ * truncating the last incomplete string value.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function tryRepairJson(raw: string): Record<string, any> | null {
+  if (!raw || !raw.trim()) return null;
+
+  let s = raw.trim();
+
+  // If it doesn't start with {, it's not salvageable
+  if (!s.startsWith("{")) return null;
+
+  // Try as-is first (maybe it's valid)
+  try {
+    return JSON.parse(s);
+  } catch {}
+
+  // Strategy 1: close any open strings and brackets
+  // Count unmatched braces and brackets
+  let inString = false;
+  let escaped = false;
+  const stack: string[] = [];
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"' && !inString) {
+      inString = true;
+    } else if (ch === '"' && inString) {
+      inString = false;
+    } else if (!inString) {
+      if (ch === "{") stack.push("}");
+      else if (ch === "[") stack.push("]");
+      else if (ch === "}" || ch === "]") stack.pop();
+    }
+  }
+
+  // If we're inside a string, close it
+  if (inString) s += '"';
+
+  // Close any open structures
+  while (stack.length > 0) s += stack.pop();
+
+  try {
+    return JSON.parse(s);
+  } catch {}
+
+  // Strategy 2: truncate the last incomplete key-value pair
+  // Find the last complete key-value pair by looking for the last comma or opening brace
+  const lastComma = raw.lastIndexOf(",");
+  if (lastComma > 0) {
+    let truncated = raw.slice(0, lastComma).trim();
+    // Close any open structures
+    const opens = (truncated.match(/{/g) || []).length;
+    const closes = (truncated.match(/}/g) || []).length;
+    for (let i = 0; i < opens - closes; i++) truncated += "}";
+    const openBrackets = (truncated.match(/\[/g) || []).length;
+    const closeBrackets = (truncated.match(/]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) truncated += "]";
+    try {
+      return JSON.parse(truncated);
+    } catch {}
+  }
+
+  return null;
 }
 
 async function nonStreamingFallback(

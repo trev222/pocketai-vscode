@@ -6,12 +6,22 @@ import type { ChatSession, ResourceWarning, RuntimeDiagnostics } from "./types";
 import {
   DEFAULT_WORKSPACE_FILE_LIMIT,
   DEFAULT_CURRENT_FILE_CHAR_LIMIT,
+  DEFAULT_CONTEXT_WINDOW_SIZE,
   TOOL_USE_INSTRUCTIONS,
   EXCLUDED_DIRS_GLOB,
 } from "./constants";
 
+/**
+ * Rough token estimate: ~4 chars per token for English/code.
+ * Used for budget-aware context building.
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
 export async function buildWorkspaceContext(
   config: vscode.WorkspaceConfiguration,
+  session?: ChatSession,
 ): Promise<string> {
   const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
   const activeEditor = vscode.window.activeTextEditor;
@@ -27,24 +37,64 @@ export async function buildWorkspaceContext(
 
   if (!config.get<boolean>("includeWorkspaceContext", true)) return "";
 
+  // Token budget: reserve a portion of the context window for workspace context.
+  // As the conversation grows, shrink the workspace context to leave room.
+  const contextWindowSize =
+    config.get<number>("contextWindowSize") ?? DEFAULT_CONTEXT_WINDOW_SIZE;
+  const maxWorkspaceTokens = Math.floor(contextWindowSize * 0.25); // 25% of context window
+  let transcriptTokens = 0;
+  if (session) {
+    for (const entry of session.transcript) {
+      transcriptTokens += estimateTokens(entry.content);
+    }
+  }
+  // Remaining budget for workspace context (minimum 500 tokens)
+  const tokenBudget = Math.max(500, maxWorkspaceTokens - Math.floor(transcriptTokens * 0.1));
+  let usedTokens = 0;
+
   const roots = workspaceFolders.map((f) => f.name);
+
+  const sections: string[] = [];
+
+  const header = "You are working inside the user's VS Code workspace.";
+  sections.push(header);
+  usedTokens += estimateTokens(header);
+
+  if (roots.length) {
+    const rootsLine = `Workspace roots: ${roots.join(", ")}`;
+    sections.push(rootsLine);
+    usedTokens += estimateTokens(rootsLine);
+  }
+
+  // File tree — adaptive: shrink file count when budget is tight
+  const adaptiveFileLimit = usedTokens > tokenBudget * 0.5
+    ? Math.min(fileLimit, 50)
+    : fileLimit;
   const fileUris = await vscode.workspace.findFiles(
     "**/*",
     EXCLUDED_DIRS_GLOB,
-    fileLimit,
+    adaptiveFileLimit,
   );
   const fileList = fileUris
     .map((uri) => vscode.workspace.asRelativePath(uri, false))
     .filter(Boolean)
     .sort();
 
-  const sections = [
-    "You are working inside the user's VS Code workspace.",
-    roots.length ? `Workspace roots: ${roots.join(", ")}` : "",
-    fileList.length
-      ? `File tree (${fileList.length}${fileList.length === fileLimit ? "+" : ""} files):\n${fileList.map((f) => `- ${f}`).join("\n")}`
-      : "",
-  ];
+  if (fileList.length) {
+    const fileTree = `File tree (${fileList.length}${fileList.length === adaptiveFileLimit ? "+" : ""} files):\n${fileList.map((f) => `- ${f}`).join("\n")}`;
+    const fileTreeTokens = estimateTokens(fileTree);
+    if (usedTokens + fileTreeTokens < tokenBudget) {
+      sections.push(fileTree);
+      usedTokens += fileTreeTokens;
+    } else {
+      // Truncate file list to fit budget
+      const maxFiles = Math.max(10, Math.floor((tokenBudget - usedTokens) / 15));
+      const truncatedList = fileList.slice(0, maxFiles);
+      const truncatedTree = `File tree (${truncatedList.length} of ${fileList.length} files):\n${truncatedList.map((f) => `- ${f}`).join("\n")}\n... [${fileList.length - truncatedList.length} more files]`;
+      sections.push(truncatedTree);
+      usedTokens += estimateTokens(truncatedTree);
+    }
+  }
 
   if (activeDoc) {
     const activePath =
@@ -54,42 +104,56 @@ export async function buildWorkspaceContext(
       ? activeDoc.getText(activeEditor.selection).trim()
       : "";
     sections.push(`Active file: ${activePath}`);
-    if (selText) sections.push(`Selected text:\n${selText.slice(0, 3000)}`);
+    usedTokens += estimateTokens(`Active file: ${activePath}`);
+
+    if (selText) {
+      const selSlice = selText.slice(0, 3000);
+      const selSection = `Selected text:\n${selSlice}`;
+      usedTokens += estimateTokens(selSection);
+      sections.push(selSection);
+    }
+
+    // Active file contents — adaptive char limit based on remaining budget
+    const remainingBudgetChars = Math.max(1000, (tokenBudget - usedTokens) * 4);
+    const adaptiveCharLimit = Math.min(charLimit, remainingBudgetChars);
+
     const fullText = activeDoc.getText();
     const numbered = fullText
-      .slice(0, charLimit)
+      .slice(0, adaptiveCharLimit)
       .split(/\r?\n/)
       .map((line, i) => `${String(i + 1).padStart(4)}: ${line}`)
       .join("\n");
-    sections.push(
-      `Active file contents:\n${numbered}${fullText.length > charLimit ? "\n... [truncated]" : ""}`,
-    );
+    const activeFileSection = `Active file contents:\n${numbered}${fullText.length > adaptiveCharLimit ? "\n... [truncated]" : ""}`;
+    sections.push(activeFileSection);
+    usedTokens += estimateTokens(activeFileSection);
   }
 
-  // Open editor tabs (excluding active file)
-  const activeRelPath = activeDoc
-    ? vscode.workspace.asRelativePath(activeDoc.uri, false)
-    : "";
-  const openTabs: string[] = [];
-  for (const group of vscode.window.tabGroups.all) {
-    for (const tab of group.tabs) {
-      if (tab.input && (tab.input as { uri?: vscode.Uri }).uri) {
-        const uri = (tab.input as { uri: vscode.Uri }).uri;
-        const relPath = vscode.workspace.asRelativePath(uri, false);
-        if (relPath && relPath !== activeRelPath && !openTabs.includes(relPath)) {
-          openTabs.push(relPath);
+  // Open editor tabs (excluding active file) — only if budget allows
+  if (usedTokens < tokenBudget * 0.85) {
+    const activeRelPath = activeDoc
+      ? vscode.workspace.asRelativePath(activeDoc.uri, false)
+      : "";
+    const openTabs: string[] = [];
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tab.input && (tab.input as { uri?: vscode.Uri }).uri) {
+          const uri = (tab.input as { uri: vscode.Uri }).uri;
+          const relPath = vscode.workspace.asRelativePath(uri, false);
+          if (relPath && relPath !== activeRelPath && !openTabs.includes(relPath)) {
+            openTabs.push(relPath);
+          }
         }
       }
     }
-  }
-  if (openTabs.length) {
-    sections.push(
-      `Open editor tabs:\n${openTabs.map((f) => `- ${f}`).join("\n")}`,
-    );
+    if (openTabs.length) {
+      const tabSection = `Open editor tabs:\n${openTabs.map((f) => `- ${f}`).join("\n")}`;
+      sections.push(tabSection);
+      usedTokens += estimateTokens(tabSection);
+    }
   }
 
-  // Git branch and status
-  if (config.get<boolean>("includeGitContext", true)) {
+  // Git branch and status — only if budget allows
+  if (config.get<boolean>("includeGitContext", true) && usedTokens < tokenBudget * 0.9) {
     const rootPath = workspaceFolders[0]?.uri.fsPath;
     if (rootPath) {
       try {
@@ -109,23 +173,27 @@ export async function buildWorkspaceContext(
           .trim();
         const gitSection = [`Git branch: ${branch || "(detached HEAD)"}`];
         if (gitStatus) {
+          const statusLimit = Math.min(2000, (tokenBudget - usedTokens) * 4);
           gitSection.push(
-            `Git status:\n${gitStatus.slice(0, 2000)}${gitStatus.length > 2000 ? "\n... [truncated]" : ""}`,
+            `Git status:\n${gitStatus.slice(0, statusLimit)}${gitStatus.length > statusLimit ? "\n... [truncated]" : ""}`,
           );
         } else {
           gitSection.push("Git status: clean");
         }
-        sections.push(gitSection.join("\n"));
+        const gitText = gitSection.join("\n");
+        sections.push(gitText);
+        usedTokens += estimateTokens(gitText);
       } catch {
         // Not a git repo or git not available
       }
     }
   }
 
-  // VS Code diagnostics (errors and warnings)
-  if (config.get<boolean>("includeDiagnostics", true)) {
+  // VS Code diagnostics (errors and warnings) — only if budget allows
+  if (config.get<boolean>("includeDiagnostics", true) && usedTokens < tokenBudget * 0.95) {
     const allDiagnostics = vscode.languages.getDiagnostics();
     const issues: string[] = [];
+    const maxIssues = usedTokens > tokenBudget * 0.8 ? 10 : 20;
     for (const [uri, diagnostics] of allDiagnostics) {
       const relPath = vscode.workspace.asRelativePath(uri, false);
       for (const d of diagnostics) {
@@ -140,10 +208,10 @@ export async function buildWorkspaceContext(
           issues.push(
             `- ${relPath}:${d.range.start.line + 1} ${severity}: ${d.message.slice(0, 200)}`,
           );
-          if (issues.length >= 20) break;
+          if (issues.length >= maxIssues) break;
         }
       }
-      if (issues.length >= 20) break;
+      if (issues.length >= maxIssues) break;
     }
     if (issues.length) {
       sections.push(`VS Code diagnostics:\n${issues.join("\n")}`);

@@ -8,23 +8,23 @@ import {
   buildMessages,
   type StreamingDeps,
 } from "./streaming";
-import { NON_DESTRUCTIVE_TOOL_TYPES } from "./constants";
+import { NON_DESTRUCTIVE_TOOL_TYPES, MAX_TOOL_TURNS } from "./constants";
 import type { McpManager } from "./mcp-client";
 import type { InlineDiffManager } from "./inline-diff";
 import type { TerminalManager } from "./terminal-manager";
-
-const MAX_TOOL_TURNS = 5;
+import type { MemoryManager } from "./memory-manager";
 
 export interface ToolLoopDeps {
   config: vscode.WorkspaceConfiguration;
   outputChannel: vscode.OutputChannel;
   streamingDeps: StreamingDeps;
-  buildWorkspaceContext: () => Promise<string>;
+  buildWorkspaceContext: (session?: ChatSession) => Promise<string>;
   postState: () => void;
   autoCompact?: (session: ChatSession) => Promise<void>;
   mcpManager?: McpManager;
   inlineDiffMgr?: InlineDiffManager;
   terminalMgr?: TerminalManager;
+  memoryMgr?: MemoryManager;
 }
 
 /**
@@ -46,6 +46,7 @@ export async function runToolLoop(
   );
   const previousToolKeys = new Set<string>();
   const fileReadCounts = new Map<string, number>();
+  const consecutiveErrors = { count: 0, maxRetries: 3 };
   const useStructured = deps.config.get<boolean>("useStructuredTools", false);
 
   // Auto-compact before starting the loop
@@ -54,77 +55,111 @@ export async function runToolLoop(
   }
 
   // Build workspace context once per loop invocation (unlikely to change mid-loop)
-  const workspaceContext = await deps.buildWorkspaceContext();
+  const workspaceContext = await deps.buildWorkspaceContext(session);
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     let cleanedText: string;
     let toolCalls: ToolCall[];
 
-    if (useStructured) {
-      // Structured tool calling path
-      const currentMessages = buildMessages(
-        session,
-        workspaceContext,
-        deps.streamingDeps,
-        true,
-      );
-      const mcpTools = deps.mcpManager?.getToolDefinitions() ?? [];
-      const result = await streamResponseWithTools(
-        session,
-        currentMessages,
-        maxTokens,
-        deps.streamingDeps,
-        mcpTools.length > 0 ? mcpTools : undefined,
-      );
-      cleanedText = stripFabricatedResults(
-        result.text.replace(/\s*\[end of text\]/g, ""),
-      );
+    try {
+      if (useStructured) {
+        // Structured tool calling path
+        const currentMessages = buildMessages(
+          session,
+          workspaceContext,
+          deps.streamingDeps,
+          true,
+        );
+        const mcpTools = deps.mcpManager?.getToolDefinitions() ?? [];
+        const result = await streamResponseWithTools(
+          session,
+          currentMessages,
+          maxTokens,
+          deps.streamingDeps,
+          mcpTools.length > 0 ? mcpTools : undefined,
+        );
+        cleanedText = stripFabricatedResults(
+          result.text.replace(/\s*\[end of text\]/g, ""),
+        );
 
-      if (cleanedText) {
+        if (cleanedText) {
+          session.transcript.push({ role: "assistant", content: cleanedText });
+        }
+
+        // Use structured tool calls if present, else try text parsing as fallback
+        toolCalls =
+          result.toolCalls.length > 0
+            ? result.toolCalls
+            : parseToolCalls(cleanedText);
+
+        // If we got tool calls but no text, add a placeholder transcript entry
+        if (!cleanedText && toolCalls.length > 0) {
+          const summary = toolCalls
+            .map((tc) => `${tc.type}(${tc.filePath || tc.pattern || tc.glob || tc.query || tc.command || tc.url || ""})`)
+            .join(", ");
+          session.transcript.push({
+            role: "assistant",
+            content: `[Calling tools: ${summary}]`,
+          });
+        }
+      } else {
+        // Text-based tool calling path (original behavior)
+        const currentMessages = buildMessages(
+          session,
+          workspaceContext,
+          deps.streamingDeps,
+        );
+        const text = await streamResponse(
+          session,
+          currentMessages,
+          maxTokens,
+          deps.streamingDeps,
+        );
+        cleanedText = stripFabricatedResults(
+          text.replace(/\s*\[end of text\]/g, ""),
+        );
         session.transcript.push({ role: "assistant", content: cleanedText });
+        toolCalls = parseToolCalls(cleanedText);
       }
 
-      // Use structured tool calls if present, else try text parsing as fallback
-      toolCalls =
-        result.toolCalls.length > 0
-          ? result.toolCalls
-          : parseToolCalls(cleanedText);
+      // Reset consecutive error count on success
+      consecutiveErrors.count = 0;
+    } catch (e) {
+      // Error recovery: if the LLM request fails, try to recover gracefully
+      consecutiveErrors.count++;
+      const message = e instanceof Error ? e.message : "Unknown error";
 
-      // If we got tool calls but no text, add a placeholder transcript entry
-      if (!cleanedText && toolCalls.length > 0) {
-        const summary = toolCalls
-          .map((tc) => `${tc.type}(${tc.filePath || tc.pattern || tc.glob || tc.query || tc.command || ""})`)
-          .join(", ");
+      if (consecutiveErrors.count >= consecutiveErrors.maxRetries) {
+        deps.outputChannel.appendLine(
+          `✗ Tool loop failed after ${consecutiveErrors.maxRetries} retries: ${message}`,
+        );
+        throw e; // Propagate up after max retries
+      }
+
+      // Recoverable error — log and try once more
+      deps.outputChannel.appendLine(
+        `⚠ Tool loop error (attempt ${consecutiveErrors.count}/${consecutiveErrors.maxRetries}): ${message}`,
+      );
+
+      // If we're mid-conversation, add an error note and try to continue
+      if (session.transcript.length > 0) {
         session.transcript.push({
-          role: "assistant",
-          content: `[Calling tools: ${summary}]`,
+          role: "tool",
+          content: `[Error: ${message}. Retrying...]`,
         });
+        session.status = "Retrying...";
+        deps.postState();
+        continue;
       }
-    } else {
-      // Text-based tool calling path (original behavior)
-      const currentMessages = buildMessages(
-        session,
-        workspaceContext,
-        deps.streamingDeps,
-      );
-      const text = await streamResponse(
-        session,
-        currentMessages,
-        maxTokens,
-        deps.streamingDeps,
-      );
-      cleanedText = stripFabricatedResults(
-        text.replace(/\s*\[end of text\]/g, ""),
-      );
-      session.transcript.push({ role: "assistant", content: cleanedText });
-      toolCalls = parseToolCalls(cleanedText);
+
+      throw e; // No transcript context to recover from
     }
 
     if (toolCalls.length === 0) break;
 
     // Loop detection: same tool calls repeated
     const toolKey = toolCalls
-      .map((tc) => `${tc.type}:${tc.filePath}:${tc.query || tc.pattern || ""}`)
+      .map((tc) => `${tc.type}:${tc.filePath}:${tc.query || tc.pattern || tc.url || ""}`)
       .join("|");
     if (previousToolKeys.has(toolKey)) {
       deps.outputChannel.appendLine(
@@ -156,7 +191,7 @@ export async function runToolLoop(
           loopDetected = true;
           break;
         }
-      } else if (tc.type === "edit_file" || tc.type === "create_file") {
+      } else if (tc.type === "edit_file" || tc.type === "write_file") {
         fileReadCounts.delete(tc.filePath);
       }
     }
@@ -166,31 +201,34 @@ export async function runToolLoop(
     lastEntry.toolCalls = toolCalls;
 
     // Auto-execute non-destructive tools (and MCP tools)
+    let anyToolFailed = false;
     for (const tc of toolCalls) {
       const isMcp = deps.mcpManager?.isMcpTool(tc.type) ?? false;
       const autoExec = isMcp
         ? session.mode === "auto"
         : tc.type === "run_command" || tc.type === "git_commit"
-          ? false
+          ? session.mode === "auto"
           : NON_DESTRUCTIVE_TOOL_TYPES.has(tc.type) || session.mode === "auto";
       if (autoExec) {
         tc.status = "approved";
         let result: string;
-        if (isMcp) {
-          try {
+        try {
+          if (isMcp) {
             const args = (tc as { mcpArgs?: Record<string, unknown> }).mcpArgs ?? {};
             result = await deps.mcpManager!.executeTool(tc.type, args);
-          } catch (e) {
-            result = `MCP error: ${(e as Error).message}`;
+          } else {
+            result = await executeToolCallWithHooks(
+              deps.config,
+              deps.outputChannel,
+              session,
+              tc,
+              deps.terminalMgr,
+              deps.memoryMgr,
+            );
           }
-        } else {
-          result = await executeToolCallWithHooks(
-            deps.config,
-            deps.outputChannel,
-            session,
-            tc,
-            deps.terminalMgr,
-          );
+        } catch (e) {
+          result = `Tool execution error: ${(e as Error).message}`;
+          anyToolFailed = true;
         }
         tc.result = result;
         tc.status = "executed";
@@ -211,7 +249,23 @@ export async function runToolLoop(
       break;
     }
 
-    session.status = "Thinking...";
+    // If multiple tools failed in a row, stop to prevent spinning
+    if (anyToolFailed) {
+      consecutiveErrors.count++;
+      if (consecutiveErrors.count >= consecutiveErrors.maxRetries) {
+        deps.outputChannel.appendLine(
+          `⚠ Multiple tool failures detected, stopping loop.`,
+        );
+        break;
+      }
+    }
+
+    // Auto-compact between turns if context is growing large
+    if (deps.autoCompact && turn > 0 && turn % 5 === 0) {
+      await deps.autoCompact(session);
+    }
+
+    session.status = `Thinking... (turn ${turn + 1})`;
     deps.postState();
   }
 }

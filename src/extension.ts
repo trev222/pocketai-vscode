@@ -1,11 +1,6 @@
 import * as vscode from "vscode";
-import * as fs from "fs";
-import * as path from "path";
-import * as child_process from "child_process";
 
 import type {
-  InteractionMode,
-  WebviewToExtensionMessage,
   ExtensionToWebviewMessage,
 } from "./types";
 
@@ -21,11 +16,10 @@ import { normalizeBaseUrl, getNonce } from "./helpers";
 
 import { getSettingsHtml } from "./settings-html";
 import { getChatHtml } from "./chat-html";
-import { rewindToCheckpoint } from "./checkpoints";
 import { SessionManager } from "./session-manager";
 import { EndpointManager } from "./endpoint-manager";
 import { DiffViewer } from "./diff-viewer";
-import { executeToolCallWithHooks } from "./tool-executor";
+import { executeToolCallWithHooks, clearReadTracking } from "./tool-executor";
 import { runToolLoop, type ToolLoopDeps } from "./tool-loop";
 import { type StreamingDeps } from "./streaming";
 import {
@@ -33,10 +27,13 @@ import {
   buildDiagnostics,
   estimateSessionTokens,
 } from "./workspace-context";
-import { resolveAtMentions, injectAtMentionContent } from "./at-mentions";
+import { injectAtMentionContent } from "./at-mentions";
 import { McpManager, type McpServerConfig } from "./mcp-client";
 import { InlineDiffManager } from "./inline-diff";
 import { TerminalManager } from "./terminal-manager";
+import { MemoryManager } from "./memory-manager";
+import { handleSlashCommand, type SlashCommandDeps } from "./slash-commands";
+import { setupChatMessageHandler, type MessageHandlerDeps } from "./message-handler";
 
 /* ────────────────────────────── Activation ────────────────────────────── */
 
@@ -110,6 +107,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   private settingsWebview?: vscode.Webview;
   private projectInstructionsCache = "";
   private projectInstructionsWatcher?: vscode.FileSystemWatcher;
+  private projectInstructionsWatcherDisposables: vscode.Disposable[] = [];
 
   private readonly sessionMgr: SessionManager;
   private readonly endpointMgr: EndpointManager;
@@ -117,6 +115,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   private readonly mcpManager: McpManager;
   private readonly inlineDiffMgr: InlineDiffManager;
   private readonly terminalMgr: TerminalManager;
+  private memoryMgr?: MemoryManager;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.sessionMgr = new SessionManager(context);
@@ -125,6 +124,13 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.mcpManager = new McpManager(this.outputChannel);
     this.inlineDiffMgr = new InlineDiffManager(context);
     this.terminalMgr = new TerminalManager(this.outputChannel);
+
+    // Initialize memory manager if workspace is available
+    const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (rootPath) {
+      this.memoryMgr = new MemoryManager(rootPath);
+      this.memoryMgr.load();
+    }
 
     // Wire inline diff accept/reject to tool approval flow
     this.inlineDiffMgr.onAccept = (toolCallId) => {
@@ -162,6 +168,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   dispose() {
     this.endpointMgr.dispose();
     this.projectInstructionsWatcher?.dispose();
+    for (const d of this.projectInstructionsWatcherDisposables) d.dispose();
     this.mcpManager.disposeAll();
     this.inlineDiffMgr.dispose();
     this.terminalMgr.dispose();
@@ -198,6 +205,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       getActiveMaxTokens: () =>
         this.endpointMgr.getActiveEndpointConfig().maxTokens ?? DEFAULT_MAX_TOKENS,
       broadcastToWebviews: (msg) => this.broadcastToWebviews(msg),
+      memoryContext: this.memoryMgr?.buildMemoryContext() || "",
     };
   }
 
@@ -206,11 +214,12 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       config: this.config,
       outputChannel: this.outputChannel,
       streamingDeps: this.getStreamingDeps(),
-      buildWorkspaceContext: () => buildWorkspaceContext(this.config),
+      buildWorkspaceContext: (session) => buildWorkspaceContext(this.config, session),
       postState: () => this.postState(),
       mcpManager: this.mcpManager,
       inlineDiffMgr: this.inlineDiffMgr,
       terminalMgr: this.terminalMgr,
+      memoryMgr: this.memoryMgr,
       autoCompact: async (session) => {
         const contextWindow =
           this.config.get<number>("contextWindowSize") ?? DEFAULT_CONTEXT_WINDOW_SIZE;
@@ -276,18 +285,23 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       this.config.get<string>("projectInstructionsFile") ??
       DEFAULT_PROJECT_INSTRUCTIONS_FILE;
     this.projectInstructionsWatcher?.dispose();
+    for (const d of this.projectInstructionsWatcherDisposables) d.dispose();
+    this.projectInstructionsWatcherDisposables = [];
+
     this.projectInstructionsWatcher = vscode.workspace.createFileSystemWatcher(
       `**/${fileName}`,
     );
-    this.projectInstructionsWatcher.onDidChange(() =>
-      this.loadProjectInstructions(),
+    this.projectInstructionsWatcherDisposables.push(
+      this.projectInstructionsWatcher.onDidChange(() =>
+        this.loadProjectInstructions(),
+      ),
+      this.projectInstructionsWatcher.onDidCreate(() =>
+        this.loadProjectInstructions(),
+      ),
+      this.projectInstructionsWatcher.onDidDelete(() => {
+        this.projectInstructionsCache = "";
+      }),
     );
-    this.projectInstructionsWatcher.onDidCreate(() =>
-      this.loadProjectInstructions(),
-    );
-    this.projectInstructionsWatcher.onDidDelete(() => {
-      this.projectInstructionsCache = "";
-    });
   }
 
   /* ── MCP Servers ── */
@@ -295,14 +309,21 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   private connectMcpServers() {
     const configs = this.config.get<McpServerConfig[]>("mcpServers") ?? [];
     if (configs.length === 0) return;
-    void this.mcpManager.connectAll(configs).then(() => {
-      const servers = this.mcpManager.getConnectedServers();
-      if (servers.length > 0) {
+    void this.mcpManager.connectAll(configs).then(
+      () => {
+        const servers = this.mcpManager.getConnectedServers();
+        if (servers.length > 0) {
+          this.outputChannel.appendLine(
+            `MCP: ${servers.length} server(s) connected: ${servers.join(", ")}`,
+          );
+        }
+      },
+      (err) => {
         this.outputChannel.appendLine(
-          `MCP: ${servers.length} server(s) connected: ${servers.join(", ")}`,
+          `MCP connection error: ${(err as Error).message}`,
         );
-      }
-    });
+      },
+    );
   }
 
   /* ── Webview lifecycle ── */
@@ -545,7 +566,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
     // Slash commands
     if (trimmed.startsWith("/")) {
-      const handled = await this.handleSlashCommand(session, trimmed);
+      const handled = await this.handleSlashCommandMethod(session, trimmed);
       if (handled) return;
 
       // Skill slash commands
@@ -589,6 +610,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.postState();
 
     session.currentRequest = new AbortController();
+    clearReadTracking();
     this.outputChannel.appendLine(
       `→ ${this.endpointMgr.baseUrl}/v1/chat/completions [${session.selectedModel}]`,
     );
@@ -629,152 +651,26 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleSlashCommand(
+  private getSlashCommandDeps(): SlashCommandDeps {
+    return {
+      sessionMgr: this.sessionMgr,
+      endpointMgr: this.endpointMgr,
+      memoryMgr: this.memoryMgr,
+      config: this.config,
+      getStreamingDeps: () => this.getStreamingDeps(),
+      estimateTokens: (s) => this.estimateTokens(s),
+      refreshModels: () => this.refreshModels(),
+      postState: () => this.postState(),
+      updateStatusBar: () => this.updateStatusBar(),
+      openForkedPanel: (f) => this.openForkedPanel(f),
+    };
+  }
+
+  private async handleSlashCommandMethod(
     session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
     input: string,
   ): Promise<boolean> {
-    const parts = input.split(/\s+/);
-    const cmd = parts[0].toLowerCase();
-    const arg = parts.slice(1).join(" ").trim();
-
-    switch (cmd) {
-      case "/clear":
-        session.transcript = [];
-        session.status = "Cleared.";
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return true;
-      case "/model":
-        if (arg && this.endpointMgr.models.includes(arg)) {
-          session.selectedModel = arg;
-          session.status = `Model switched to ${arg}`;
-        } else {
-          session.status = arg
-            ? `Model "${arg}" not found. Available: ${this.endpointMgr.models.join(", ")}`
-            : `Available models: ${this.endpointMgr.models.join(", ")}`;
-        }
-        this.sessionMgr.touchSession(session);
-        this.updateStatusBar();
-        await this.sessionMgr.saveState();
-        this.postState();
-        return true;
-      case "/endpoint":
-        if (arg) {
-          const match = Array.from(
-            this.endpointMgr.endpointHealthMap.values(),
-          ).find(
-            (h) =>
-              h.name.toLowerCase() === arg.toLowerCase() ||
-              h.url === normalizeBaseUrl(arg),
-          );
-          if (match) {
-            this.endpointMgr.switchEndpoint(match.url);
-            void this.refreshModels();
-            session.status = `Switched to endpoint: ${match.name}`;
-          } else {
-            session.status = `Endpoint "${arg}" not found.`;
-          }
-        } else {
-          session.status = `Endpoints: ${Array.from(this.endpointMgr.endpointHealthMap.values()).map((h) => h.name).join(", ")}`;
-        }
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return true;
-      case "/mode":
-        if (arg === "ask" || arg === "auto" || arg === "plan") {
-          session.mode = arg;
-          const labels: Record<InteractionMode, string> = {
-            ask: "Ask mode — I'll ask before making changes.",
-            auto: "Auto mode — changes applied automatically.",
-            plan: "Plan mode — I'll describe changes before making them.",
-          };
-          session.status = labels[arg];
-        } else {
-          session.status = `Usage: /mode <ask|auto|plan>`;
-        }
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return true;
-      case "/sessions":
-        session.status = `Sessions: ${this.sessionMgr.getSessionSummaries().map((s) => s.title).join(", ")}`;
-        this.postState();
-        return true;
-      case "/compact":
-        await this.sessionMgr.compactSession(
-          session,
-          this.getStreamingDeps(),
-          (s) => this.estimateTokens(s),
-          () => this.postState(),
-        );
-        return true;
-      case "/fork": {
-        const forked = this.sessionMgr.forkSession(session);
-        this.openForkedPanel(forked);
-        session.status = `Forked → "${forked.title}"`;
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return true;
-      }
-      case "/branch": {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders?.length) {
-          session.status = "No workspace folder open.";
-          this.postState();
-          return true;
-        }
-        const rootPath = workspaceFolders[0].uri.fsPath;
-        try {
-          if (!arg) {
-            // Show current branch
-            const current = child_process
-              .execSync("git branch --show-current", { cwd: rootPath, encoding: "utf-8" })
-              .trim();
-            const branches = child_process
-              .execSync("git branch --list", { cwd: rootPath, encoding: "utf-8" })
-              .trim();
-            session.status = `On branch: ${current}`;
-            session.transcript.push({
-              role: "tool",
-              content: `Current branch: **${current}**\n\`\`\`\n${branches}\n\`\`\``,
-            });
-          } else if (arg.startsWith("-d ")) {
-            const branchName = arg.slice(3).trim();
-            child_process.execSync(`git branch -d ${branchName}`, { cwd: rootPath, encoding: "utf-8" });
-            session.status = `Deleted branch: ${branchName}`;
-          } else {
-            // Create and switch to branch, or just switch if it exists
-            try {
-              child_process.execSync(`git checkout -b ${arg}`, { cwd: rootPath, encoding: "utf-8" });
-              session.status = `Created and switched to branch: ${arg}`;
-            } catch {
-              child_process.execSync(`git checkout ${arg}`, { cwd: rootPath, encoding: "utf-8" });
-              session.status = `Switched to branch: ${arg}`;
-            }
-          }
-        } catch (e) {
-          session.status = `Git error: ${(e as Error).message}`;
-        }
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return true;
-      }
-      case "/tokens": {
-        const cum = session.cumulativeTokens;
-        const total = cum.prompt + cum.completion;
-        session.status = total > 0
-          ? `Session tokens — Prompt: ${cum.prompt.toLocaleString()}, Completion: ${cum.completion.toLocaleString()}, Total: ${total.toLocaleString()}`
-          : "No tokens used yet in this session.";
-        this.postState();
-        return true;
-      }
-      default:
-        return false;
-    }
+    return handleSlashCommand(session, input, this.getSlashCommandDeps());
   }
 
   private async executeMcpToolCall(tc: import("./types").ToolCall): Promise<string> {
@@ -812,6 +708,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
                 session,
                 tc,
                 this.terminalMgr,
+                this.memoryMgr,
               );
           tc.result = result;
           tc.status = "executed";
@@ -865,6 +762,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
                 session,
                 tc,
                 this.terminalMgr,
+                this.memoryMgr,
               );
           tc.result = result;
           tc.status = "executed";
@@ -1083,6 +981,26 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
   /* ── Chat webview initialization ── */
 
+  private getMessageHandlerDeps(): MessageHandlerDeps {
+    return {
+      sessionMgr: this.sessionMgr,
+      endpointMgr: this.endpointMgr,
+      diffViewer: this.diffViewer,
+      outputChannel: this.outputChannel,
+      webviews: this.webviews,
+      sendPrompt: (sid, prompt, images) => this.sendPrompt(sid, prompt, images),
+      handleUseSelection: (sid) => this.handleUseSelection(sid),
+      handleToolApproval: (sid, tcId, approved) =>
+        this.handleToolApproval(sid, tcId, approved),
+      handleBatchToolApproval: (sid, approved) =>
+        this.handleBatchToolApproval(sid, approved),
+      refreshModels: () => this.refreshModels(),
+      postState: () => this.postState(),
+      postStateToWebview: (wv, sid) => this.postStateToWebview(wv, sid),
+      openForkedPanel: (f) => this.openForkedPanel(f),
+    };
+  }
+
   private initializeChatWebview(
     webview: vscode.Webview,
     getSessionId: () => string,
@@ -1094,220 +1012,14 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     webview.html = this.getHtml(webview);
     this.webviews.add(webview);
 
-    webview.onDidReceiveMessage(async (message: WebviewToExtensionMessage) => {
-      try {
-        const sessionId = getSessionId();
-        switch (message.type) {
-          case "ready":
-            await this.refreshModels();
-            this.postStateToWebview(webview, getSessionId());
-            return;
-          case "sendPrompt":
-            await this.sendPrompt(sessionId, message.prompt, message.images);
-            return;
-          case "selectModel": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            session.selectedModel = message.modelId;
-            this.sessionMgr.touchSession(session);
-            await this.sessionMgr.saveState();
-            this.postState();
-            return;
-          }
-          case "refreshModels":
-            await this.refreshModels();
-            this.postState();
-            return;
-          case "useSelection":
-            await this.handleUseSelection(sessionId);
-            return;
-          case "clear": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            session.transcript = [];
-            session.status = "Cleared.";
-            this.sessionMgr.touchSession(session);
-            await this.sessionMgr.saveState();
-            this.postState();
-            return;
-          }
-          case "newSession":
-            newSession();
-            return;
-          case "switchSession":
-            switchSession(message.sessionId);
-            return;
-          case "deleteSession":
-            deleteSession(message.sessionId);
-            return;
-          case "setMode": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            session.mode = message.mode;
-            const modeLabels: Record<InteractionMode, string> = {
-              ask: "Ask mode — I'll ask before making changes.",
-              auto: "Auto mode — changes applied automatically.",
-              plan: "Plan mode — I'll describe changes before making them.",
-            };
-            session.status = modeLabels[session.mode];
-            this.sessionMgr.touchSession(session);
-            await this.sessionMgr.saveState();
-            this.postState();
-            return;
-          }
-          case "approveToolCall":
-            await this.handleToolApproval(sessionId, message.toolCallId, true);
-            return;
-          case "rejectToolCall":
-            await this.handleToolApproval(sessionId, message.toolCallId, false);
-            return;
-          case "approveAllToolCalls":
-            await this.handleBatchToolApproval(sessionId, true);
-            return;
-          case "rejectAllToolCalls":
-            await this.handleBatchToolApproval(sessionId, false);
-            return;
-          case "cancelRequest": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            session.currentRequest?.abort();
-            return;
-          }
-          case "selectEndpoint":
-            this.endpointMgr.switchEndpoint(message.endpointUrl);
-            void this.refreshModels();
-            return;
-          case "exportSession": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            const md = session.transcript
-              .filter((e) => e.role === "user" || e.role === "assistant")
-              .map(
-                (e) =>
-                  `## ${e.role === "user" ? "You" : "PocketAI"}\n\n${e.content}\n`,
-              )
-              .join("\n");
-            const uri = await vscode.window.showSaveDialog({
-              defaultUri: vscode.Uri.file(
-                `${session.title.replace(/[^a-zA-Z0-9]/g, "_")}.md`,
-              ),
-              filters: { Markdown: ["md"] },
-            });
-            if (uri) {
-              fs.writeFileSync(uri.fsPath, md, "utf-8");
-              void vscode.window.showInformationMessage(
-                `Exported to ${uri.fsPath}`,
-              );
-            }
-            return;
-          }
-          case "searchSessions": {
-            const query = message.query.toLowerCase();
-            if (!query) {
-              this.postState();
-              return;
-            }
-            const filtered = this.sessionMgr
-              .getSessionSummaries()
-              .filter((s) => {
-                if (s.title.toLowerCase().includes(query)) return true;
-                const sess = this.sessionMgr.sessions.get(s.id);
-                return sess?.transcript.some((e) =>
-                  e.content.toLowerCase().includes(query),
-                );
-              });
-            for (const wv of this.webviews) {
-              wv.postMessage({
-                type: "filteredSessions",
-                sessions: filtered,
-              } satisfies ExtensionToWebviewMessage);
-            }
-            return;
-          }
-          case "rewindToCheckpoint": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            const status = await rewindToCheckpoint(
-              session,
-              message.checkpointIndex,
-              message.restoreCode,
-              message.restoreConversation,
-              this.outputChannel,
-            );
-            session.status = status;
-            this.sessionMgr.touchSession(session);
-            await this.sessionMgr.saveState();
-            this.postState();
-            return;
-          }
-          case "forkFromMessage": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            const forked = this.sessionMgr.forkSession(
-              session,
-              message.messageIndex,
-            );
-            this.openForkedPanel(forked);
-            session.status = `Forked → "${forked.title}"`;
-            this.sessionMgr.touchSession(session);
-            await this.sessionMgr.saveState();
-            this.postState();
-            return;
-          }
-          case "resolveAtMention": {
-            const suggestions = await resolveAtMentions(message.query);
-            webview.postMessage({
-              type: "atMentionResults",
-              suggestions,
-            } satisfies ExtensionToWebviewMessage);
-            return;
-          }
-          case "openDiff": {
-            const session = this.sessionMgr.requireSession(sessionId);
-            if (!session) return;
-            await this.diffViewer.openDiffForToolCall(
-              session,
-              message.toolCallId,
-              this.outputChannel,
-            );
-            return;
-          }
-          case "openFile": {
-            const workspaceFolders = vscode.workspace.workspaceFolders;
-            if (!workspaceFolders?.length) return;
-            const rootPath = workspaceFolders[0].uri.fsPath;
-            const filePath = message.filePath as string;
-            const absPath = path.resolve(rootPath, filePath);
-            if (!absPath.startsWith(rootPath)) return;
-            try {
-              const doc = await vscode.workspace.openTextDocument(
-                vscode.Uri.file(absPath),
-              );
-              await vscode.window.showTextDocument(doc);
-            } catch {
-              void vscode.window.showWarningMessage(
-                `Could not open file: ${filePath}`,
-              );
-            }
-            return;
-          }
-          case "openExternal": {
-            const url = message.url as string;
-            if (url) {
-              void vscode.env.openExternal(vscode.Uri.parse(url));
-            }
-            return;
-          }
-        }
-      } catch (err) {
-        this.outputChannel.appendLine(
-          `✗ Message handler error: ${(err as Error).message}`,
-        );
-        vscode.window.showErrorMessage(
-          `PocketAI: ${(err as Error).message}`,
-        );
-      }
-    });
+    setupChatMessageHandler(
+      webview,
+      getSessionId,
+      switchSession,
+      newSession,
+      deleteSession,
+      this.getMessageHandlerDeps(),
+    );
   }
 
   /* ── HTML ── */

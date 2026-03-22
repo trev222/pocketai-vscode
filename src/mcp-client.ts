@@ -225,7 +225,20 @@ class McpServerConnection {
   private sendRequest(method: string, params?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
+
+      const timeoutHandle = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(
+            new Error(`MCP request timed out: ${method} on ${this.config.name}`),
+          );
+        }
+      }, 30000);
+
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timeoutHandle); resolve(v); },
+        reject: (e) => { clearTimeout(timeoutHandle); reject(e); },
+      });
 
       const msg: JsonRpcMessage = {
         jsonrpc: "2.0",
@@ -237,19 +250,10 @@ class McpServerConnection {
       const data = JSON.stringify(msg) + "\n";
       const ok = this.process.stdin?.write(data);
       if (!ok) {
+        clearTimeout(timeoutHandle);
         this.pending.delete(id);
         reject(new Error(`Failed to write to MCP server ${this.config.name}`));
       }
-
-      // Timeout after 30s
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(
-            new Error(`MCP request timed out: ${method} on ${this.config.name}`),
-          );
-        }
-      }, 30000);
     });
   }
 
@@ -302,6 +306,10 @@ class McpServerConnection {
     try {
       this.process.kill();
     } catch {}
+    // Reject all pending requests so their timeouts get cleared
+    for (const [, p] of this.pending) {
+      p.reject(new Error(`MCP server ${this.config.name} disposed`));
+    }
     this.pending.clear();
   }
 }

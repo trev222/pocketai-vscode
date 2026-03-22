@@ -9,11 +9,24 @@ import { runHooks } from "./hooks";
 import { createCheckpoint } from "./checkpoints";
 import { EXCLUDED_DIRS, EXCLUDED_DIRS_GLOB } from "./constants";
 import type { TerminalManager } from "./terminal-manager";
+import type { MemoryManager, MemoryType } from "./memory-manager";
+
+/**
+ * Tracks which files have been read in the current session.
+ * Edit and write operations on existing files require a prior read.
+ */
+const filesReadInSession = new Set<string>();
+
+/** Clear read tracking (call on new session). */
+export function clearReadTracking() {
+  filesReadInSession.clear();
+}
 
 /** Returns the primary argument for a tool call (used for permission checks). */
 function getToolArg(tc: ToolCall): string {
   const argByType: Partial<Record<ToolCallType, string>> = {
     web_search: tc.query || "",
+    web_fetch: tc.url || "",
     run_command: tc.command || "",
     grep: tc.pattern || "",
     glob: tc.glob || "",
@@ -28,6 +41,7 @@ export async function executeToolCall(
   session: ChatSession,
   toolCall: ToolCall,
   terminalMgr?: TerminalManager,
+  memoryMgr?: MemoryManager,
 ): Promise<string> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders?.length) {
@@ -35,7 +49,9 @@ export async function executeToolCall(
   }
 
   const rootPath = workspaceFolders[0].uri.fsPath;
-  const fullPath = path.resolve(rootPath, toolCall.filePath);
+  const fullPath = toolCall.filePath
+    ? path.resolve(rootPath, toolCall.filePath)
+    : rootPath;
 
   // Check permission rules
   const toolArg = getToolArg(toolCall);
@@ -54,58 +70,119 @@ export async function executeToolCall(
     return `Blocked by hook: ${(e as Error).message}`;
   }
 
-  // Security: ensure the path is within the workspace
-  if (!fullPath.startsWith(rootPath)) {
+  // Security: ensure the path is within the workspace (for file-based tools)
+  if (toolCall.filePath && !fullPath.startsWith(rootPath)) {
     return "Error: Path is outside the workspace.";
   }
 
   switch (toolCall.type) {
+    /* ================================================================ */
+    /*  READ FILE                                                        */
+    /* ================================================================ */
     case "read_file": {
       try {
-        const content = fs.readFileSync(fullPath, "utf-8");
-        const lines = content.split("\n");
-        const TRUNCATE_THRESHOLD = 500;
-        const HEAD_LINES = 200;
-        const TAIL_LINES = 200;
+        const stat = fs.statSync(fullPath);
 
-        let numbered: string;
-        if (lines.length > TRUNCATE_THRESHOLD) {
-          const head = lines
-            .slice(0, HEAD_LINES)
-            .map((line, i) => `${String(i + 1).padStart(4)}: ${line}`)
-            .join("\n");
-          const tail = lines
-            .slice(-TAIL_LINES)
-            .map((line, i) => `${String(lines.length - TAIL_LINES + i + 1).padStart(4)}: ${line}`)
-            .join("\n");
-          const truncated = lines.length - HEAD_LINES - TAIL_LINES;
-          numbered = `${head}\n\n... [${truncated} lines truncated] ...\n\n${tail}`;
-        } else {
-          numbered = lines
-            .map((line, i) => `${String(i + 1).padStart(4)}: ${line}`)
-            .join("\n");
+        // Binary / image file detection
+        const ext = path.extname(fullPath).toLowerCase();
+        const imageExts = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"];
+        if (imageExts.includes(ext)) {
+          filesReadInSession.add(toolCall.filePath);
+          return `[Image file: ${toolCall.filePath} (${formatFileSize(stat.size)})]`;
         }
-        return `Contents of \`${toolCall.filePath}\` (${lines.length} lines):\n\`\`\`\n${numbered}\n\`\`\``;
+
+        const content = fs.readFileSync(fullPath, "utf-8");
+        const allLines = content.split("\n");
+
+        filesReadInSession.add(toolCall.filePath);
+
+        const MAX_LINES = 2000;
+        const MAX_LINE_LENGTH = 2000;
+        const offset = Math.max(0, (toolCall.offset ?? 1) - 1); // convert 1-based to 0-based
+        const limit = toolCall.limit ?? MAX_LINES;
+
+        const sliced = allLines.slice(offset, offset + limit);
+        const truncatedLineCount = Math.max(0, allLines.length - offset - limit);
+
+        const numbered = sliced
+          .map((line, i) => {
+            const lineNum = offset + i + 1;
+            const truncLine =
+              line.length > MAX_LINE_LENGTH
+                ? line.slice(0, MAX_LINE_LENGTH) + "..."
+                : line;
+            return `${String(lineNum).padStart(6)}\t${truncLine}`;
+          })
+          .join("\n");
+
+        let result = numbered;
+        if (truncatedLineCount > 0) {
+          result += `\n\n... (${truncatedLineCount} more lines not shown. Use offset/limit to read more.)`;
+        }
+
+        return result;
       } catch (e) {
         return `Error reading file: ${(e as Error).message}`;
       }
     }
 
+    /* ================================================================ */
+    /*  EDIT FILE                                                        */
+    /* ================================================================ */
     case "edit_file": {
       try {
+        // Require prior read
+        if (!filesReadInSession.has(toolCall.filePath)) {
+          return `Error: You must read ${toolCall.filePath} before editing it. Use read_file first.`;
+        }
+
         const content = fs.readFileSync(fullPath, "utf-8");
-        if (!toolCall.search || !content.includes(toolCall.search)) {
+        const searchText = toolCall.search || "";
+
+        if (!searchText) {
+          return "Error: old_string (search) is required and must not be empty.";
+        }
+
+        if (!content.includes(searchText)) {
+          // Provide helpful context
           const lines = content.split("\n");
-          const snippet = lines.slice(0, Math.min(20, lines.length)).join("\n");
-          return `Error: Search text not found in \`${toolCall.filePath}\`.\n\nSearched for:\n\`\`\`\n${toolCall.search}\n\`\`\`\n\nFirst ${Math.min(20, lines.length)} lines of file:\n\`\`\`\n${snippet}\n\`\`\`\n\nTip: Re-read the file to get its current contents before editing.`;
+          const totalLines = lines.length;
+          const previewLines = Math.min(30, totalLines);
+          const snippet = lines.slice(0, previewLines).join("\n");
+          return (
+            `Error: old_string not found in \`${toolCall.filePath}\`.\n\n` +
+            `Searched for:\n\`\`\`\n${searchText}\n\`\`\`\n\n` +
+            `First ${previewLines} lines of file (${totalLines} total):\n\`\`\`\n${snippet}\n\`\`\`\n\n` +
+            `Tip: The old_string must match EXACTLY including whitespace and indentation. ` +
+            `Re-read the file to get its current contents.`
+          );
         }
-        // Uniqueness check: ensure the search text appears exactly once
-        const occurrences = content.split(toolCall.search).length - 1;
+
+        if (toolCall.replaceAll) {
+          // Replace all occurrences
+          createCheckpoint(session, [toolCall.filePath]);
+          const newContent = content.split(searchText).join(toolCall.replace || "");
+          const occurrences = content.split(searchText).length - 1;
+          fs.writeFileSync(fullPath, newContent, "utf-8");
+          void runHooks(config, outputChannel, "postEdit", {
+            file: toolCall.filePath,
+            tool: "edit_file",
+          });
+          return `Successfully replaced ${occurrences} occurrence(s) in \`${toolCall.filePath}\`.`;
+        }
+
+        // Single replacement — must be unique
+        const occurrences = content.split(searchText).length - 1;
         if (occurrences > 1) {
-          return `Error: Search text matches ${occurrences} locations in \`${toolCall.filePath}\`. Include more surrounding context in the SEARCH block to uniquely identify the edit location.`;
+          return (
+            `Error: old_string matches ${occurrences} locations in \`${toolCall.filePath}\`. ` +
+            `The edit will FAIL if old_string is not unique. ` +
+            `Either include more surrounding context to make it unique, or use replace_all to change every instance.`
+          );
         }
+
         createCheckpoint(session, [toolCall.filePath]);
-        const newContent = content.replace(toolCall.search, toolCall.replace || "");
+        const newContent = content.replace(searchText, toolCall.replace || "");
         fs.writeFileSync(fullPath, newContent, "utf-8");
         void runHooks(config, outputChannel, "postEdit", {
           file: toolCall.filePath,
@@ -117,22 +194,38 @@ export async function executeToolCall(
       }
     }
 
-    case "create_file": {
+    /* ================================================================ */
+    /*  WRITE FILE (replaces create_file)                                */
+    /* ================================================================ */
+    case "write_file": {
       try {
+        const exists = fs.existsSync(fullPath);
+
+        // If overwriting an existing file, require prior read
+        if (exists && !filesReadInSession.has(toolCall.filePath)) {
+          return `Error: File \`${toolCall.filePath}\` already exists. You must read it with read_file before overwriting. Use edit_file instead if you only need to change part of it.`;
+        }
+
         createCheckpoint(session, [toolCall.filePath]);
         const dir = path.dirname(fullPath);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(fullPath, toolCall.content || "", "utf-8");
-        void runHooks(config, outputChannel, "postCreate", {
+        filesReadInSession.add(toolCall.filePath);
+        void runHooks(config, outputChannel, exists ? "postEdit" : "postCreate", {
           file: toolCall.filePath,
-          tool: "create_file",
+          tool: "write_file",
         });
-        return `Successfully created \`${toolCall.filePath}\`.`;
+        return exists
+          ? `Successfully overwrote \`${toolCall.filePath}\`.`
+          : `Successfully created \`${toolCall.filePath}\`.`;
       } catch (e) {
-        return `Error creating file: ${(e as Error).message}`;
+        return `Error writing file: ${(e as Error).message}`;
       }
     }
 
+    /* ================================================================ */
+    /*  WEB SEARCH                                                       */
+    /* ================================================================ */
     case "web_search": {
       try {
         const query = toolCall.query || "";
@@ -140,13 +233,16 @@ export async function executeToolCall(
         const response = await fetch(url, {
           headers: { "User-Agent": "PocketAI/1.0" },
         });
+        if (!response.ok) {
+          return `Web search failed (HTTP ${response.status}): ${response.statusText}`;
+        }
         const html = await response.text();
 
         const results: string[] = [];
         const resultRegex =
           /<a rel="nofollow" class="result__a" href="[^"]*"[^>]*>(.+?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
         let m;
-        while ((m = resultRegex.exec(html)) !== null && results.length < 5) {
+        while ((m = resultRegex.exec(html)) !== null && results.length < 8) {
           const title = m[1].replace(/<[^>]+>/g, "").trim();
           const snippet = m[2].replace(/<[^>]+>/g, "").trim();
           if (title && snippet) {
@@ -156,7 +252,7 @@ export async function executeToolCall(
 
         if (results.length === 0) {
           const snippetRegex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-          while ((m = snippetRegex.exec(html)) !== null && results.length < 5) {
+          while ((m = snippetRegex.exec(html)) !== null && results.length < 8) {
             const snippet = m[1].replace(/<[^>]+>/g, "").trim();
             if (snippet) results.push(snippet);
           }
@@ -172,6 +268,56 @@ export async function executeToolCall(
       }
     }
 
+    /* ================================================================ */
+    /*  WEB FETCH                                                        */
+    /* ================================================================ */
+    case "web_fetch": {
+      try {
+        const fetchUrl = toolCall.url || "";
+        if (!fetchUrl) return "Error: No URL provided.";
+
+        const response = await fetch(fetchUrl, {
+          headers: {
+            "User-Agent": "PocketAI/1.0",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+          },
+          redirect: "follow",
+          signal: AbortSignal.timeout(30000),
+        });
+
+        if (!response.ok) {
+          return `Fetch failed (HTTP ${response.status}): ${response.statusText}`;
+        }
+
+        const contentType = response.headers.get("content-type") || "";
+        const text = await response.text();
+
+        if (contentType.includes("text/html") || contentType.includes("application/xhtml")) {
+          // Extract readable text from HTML
+          const extracted = extractTextFromHtml(text);
+          const maxChars = 50000;
+          const truncated =
+            extracted.length > maxChars
+              ? extracted.slice(0, maxChars) + "\n\n... [truncated]"
+              : extracted;
+          return `Content from ${fetchUrl}:\n\n${truncated}`;
+        }
+
+        // Plain text / JSON / other
+        const maxChars = 50000;
+        const truncated =
+          text.length > maxChars
+            ? text.slice(0, maxChars) + "\n\n... [truncated]"
+            : text;
+        return `Content from ${fetchUrl}:\n\n${truncated}`;
+      } catch (e) {
+        return `Error fetching URL: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
+    /*  LIST FILES                                                       */
+    /* ================================================================ */
     case "list_files": {
       try {
         const entries = fs.readdirSync(fullPath, { withFileTypes: true });
@@ -192,6 +338,9 @@ export async function executeToolCall(
       }
     }
 
+    /* ================================================================ */
+    /*  RUN COMMAND (Bash)                                               */
+    /* ================================================================ */
     case "run_command": {
       const cmd = toolCall.command || "";
       if (!cmd) return "Error: No command provided.";
@@ -202,21 +351,26 @@ export async function executeToolCall(
         return checkBackgroundTask(taskId);
       }
 
+      const timeoutMs = Math.min(toolCall.timeout || 120000, 600000);
+
       if (toolCall.background) {
         const taskId = `bg_${Date.now().toString(36)}`;
         const task = runCommandInBackground(cmd, rootPath, outputChannel, taskId);
         backgroundTasks.set(taskId, task);
-        return `Command started in background (id: ${taskId}): \`${cmd}\`\nUse @run_command: bg_status ${taskId} to check status.`;
+        return `Command started in background (id: ${taskId}): \`${cmd}\`\nUse run_command with "bg_status ${taskId}" to check status.`;
       }
 
       // Use integrated terminal when available and enabled
-      const useTerminal = config.get<boolean>("useIntegratedTerminal", true) && terminalMgr;
+      const useTerminal =
+        config.get<boolean>("useIntegratedTerminal", true) && terminalMgr;
       if (useTerminal) {
         try {
-          const { output: termOutput, exitCode } = await terminalMgr.executeCommand(cmd, rootPath);
-          const output = termOutput.length > 10000
-            ? termOutput.slice(0, 10000) + "\n... [truncated]"
-            : termOutput;
+          const { output: termOutput, exitCode } =
+            await terminalMgr.executeCommand(cmd, rootPath);
+          const output =
+            termOutput.length > 10000
+              ? termOutput.slice(0, 10000) + "\n... [truncated]"
+              : termOutput;
           if (exitCode !== undefined && exitCode !== 0) {
             return `Command failed (exit ${exitCode}): \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
           }
@@ -227,44 +381,142 @@ export async function executeToolCall(
       }
 
       try {
-        const result = await runCommandWithStreaming(cmd, rootPath, outputChannel);
+        const result = await runCommandWithStreaming(
+          cmd,
+          rootPath,
+          outputChannel,
+          timeoutMs,
+        );
         const output =
           result.length > 10000
             ? result.slice(0, 10000) + "\n... [truncated]"
             : result;
         return `Command: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
       } catch (e) {
-        const err = e as { stderr?: string; stdout?: string; message: string };
+        const err = e as {
+          stderr?: string;
+          stdout?: string;
+          message: string;
+        };
         const output = (err.stderr || err.stdout || err.message).slice(0, 10000);
         return `Command failed: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
       }
     }
 
+    /* ================================================================ */
+    /*  GREP                                                             */
+    /* ================================================================ */
     case "grep": {
       const pattern = toolCall.pattern || "";
       if (!pattern) return "Error: No search pattern provided.";
       try {
-        const args = ["--color=never", "-n", "-r", "--max-count=100"];
-        if (toolCall.glob) {
+        const args = ["--color=never", "-n", "-r"];
+
+        // Output mode
+        const mode = toolCall.outputMode || "files_with_matches";
+        if (mode === "files_with_matches") {
+          args.push("-l");
+        } else if (mode === "count") {
+          args.push("-c");
+        }
+
+        // Context lines
+        if (mode === "content") {
+          if (toolCall.contextLines !== undefined) {
+            args.push(`-C`, String(toolCall.contextLines));
+          }
+          if (toolCall.beforeLines !== undefined) {
+            args.push(`-B`, String(toolCall.beforeLines));
+          }
+          if (toolCall.afterLines !== undefined) {
+            args.push(`-A`, String(toolCall.afterLines));
+          }
+        }
+
+        // Case insensitive
+        if (toolCall.caseInsensitive) {
+          args.push("-i");
+        }
+
+        // Multiline (use -P for Perl regex with -z for null-delimited)
+        if (toolCall.multiline) {
+          args.push("-P", "-z");
+        }
+
+        // File type filter
+        if (toolCall.grepType) {
+          const typeGlobs: Record<string, string> = {
+            ts: "*.ts",
+            tsx: "*.tsx",
+            js: "*.js",
+            jsx: "*.jsx",
+            py: "*.py",
+            rust: "*.rs",
+            go: "*.go",
+            java: "*.java",
+            css: "*.css",
+            html: "*.html",
+            json: "*.json",
+            yaml: "*.yaml",
+            yml: "*.yml",
+            md: "*.md",
+            swift: "*.swift",
+          };
+          const g = typeGlobs[toolCall.grepType] || `*.${toolCall.grepType}`;
+          args.push("--include", g);
+        } else if (toolCall.glob) {
           args.push("--include", toolCall.glob);
         } else {
           for (const dir of EXCLUDED_DIRS) {
             args.push(`--exclude-dir=${dir}`);
           }
         }
-        args.push("-E", pattern, ".");
+
+        // Max results
+        const maxCount = toolCall.headLimit || 200;
+        if (mode !== "files_with_matches") {
+          args.push("--max-count=500");
+        }
+
+        args.push("-E", pattern);
+
+        // Search path
+        const searchPath = toolCall.filePath || ".";
+        args.push(searchPath);
+
         const result = child_process.execFileSync("grep", args, {
           cwd: rootPath,
           encoding: "utf-8",
           timeout: 15000,
-          maxBuffer: 512 * 1024,
+          maxBuffer: 1024 * 1024,
         });
-        const lines = result.trim().split("\n");
-        const truncated = lines.length > 100;
-        const output = lines.slice(0, 100).join("\n");
-        return `Search results for \`${pattern}\`${toolCall.glob ? ` (glob: ${toolCall.glob})` : ""} — ${Math.min(lines.length, 100)} matches${truncated ? " [truncated]" : ""}:\n\`\`\`\n${output}\n\`\`\``;
+
+        let lines = result.trim().split("\n").filter(Boolean);
+
+        // Apply offset and head limit
+        if (toolCall.grepOffset) {
+          lines = lines.slice(toolCall.grepOffset);
+        }
+        if (maxCount && lines.length > maxCount) {
+          lines = lines.slice(0, maxCount);
+        }
+
+        const output = lines.join("\n");
+        const label =
+          mode === "files_with_matches"
+            ? `${lines.length} file(s)`
+            : mode === "count"
+              ? `Match counts`
+              : `${lines.length} match(es)`;
+
+        return `Search results for \`${pattern}\`${toolCall.glob ? ` (glob: ${toolCall.glob})` : ""} — ${label}:\n\`\`\`\n${output}\n\`\`\``;
       } catch (e) {
-        const err = e as { status?: number; stdout?: string; stderr?: string; message: string };
+        const err = e as {
+          status?: number;
+          stdout?: string;
+          stderr?: string;
+          message: string;
+        };
         if (err.status === 1) {
           return `No matches found for pattern \`${pattern}\`${toolCall.glob ? ` in ${toolCall.glob}` : ""}.`;
         }
@@ -272,27 +524,52 @@ export async function executeToolCall(
       }
     }
 
+    /* ================================================================ */
+    /*  GLOB                                                             */
+    /* ================================================================ */
     case "glob": {
       const globPattern = toolCall.glob || "";
       if (!globPattern) return "Error: No glob pattern provided.";
       try {
+        // Use relative pattern if path is specified
+        const searchBase = toolCall.globPath
+          ? new vscode.RelativePattern(
+              vscode.Uri.file(path.resolve(rootPath, toolCall.globPath)),
+              globPattern,
+            )
+          : globPattern;
+
         const uris = await vscode.workspace.findFiles(
-          globPattern,
+          searchBase,
           EXCLUDED_DIRS_GLOB,
-          200,
+          500,
         );
         if (uris.length === 0) {
           return `No files found matching \`${globPattern}\`.`;
         }
-        const files = uris
-          .map((u) => vscode.workspace.asRelativePath(u, false))
-          .sort();
-        return `Files matching \`${globPattern}\` (${files.length} results${files.length === 200 ? ", truncated" : ""}):\n${files.map((f) => `- ${f}`).join("\n")}`;
+
+        // Sort by modification time (most recent first)
+        const filesWithTime = uris.map((u) => {
+          let mtime = 0;
+          try {
+            mtime = fs.statSync(u.fsPath).mtimeMs;
+          } catch {}
+          return { uri: u, mtime };
+        });
+        filesWithTime.sort((a, b) => b.mtime - a.mtime);
+
+        const files = filesWithTime.map((f) =>
+          vscode.workspace.asRelativePath(f.uri, false),
+        );
+        return `Files matching \`${globPattern}\` (${files.length} results${files.length === 500 ? ", truncated" : ""}):\n${files.map((f) => `- ${f}`).join("\n")}`;
       } catch (e) {
         return `Error finding files: ${(e as Error).message}`;
       }
     }
 
+    /* ================================================================ */
+    /*  GIT STATUS                                                       */
+    /* ================================================================ */
     case "git_status": {
       try {
         const result = child_process.execSync("git status --short", {
@@ -307,32 +584,52 @@ export async function executeToolCall(
       }
     }
 
+    /* ================================================================ */
+    /*  GIT DIFF                                                         */
+    /* ================================================================ */
     case "git_diff": {
       try {
-        const result = child_process.execSync("git diff", {
+        const unstaged = child_process.execSync("git diff", {
           cwd: rootPath,
           encoding: "utf-8",
           timeout: 10000,
           maxBuffer: 512 * 1024,
         });
-        if (!result.trim()) {
-          const staged = child_process.execSync("git diff --cached", {
-            cwd: rootPath,
-            encoding: "utf-8",
-            timeout: 10000,
-            maxBuffer: 512 * 1024,
-          });
-          if (!staged.trim()) return "No changes (working tree and staging area are clean).";
-          const output = staged.length > 5000 ? staged.slice(0, 5000) + "\n... [truncated]" : staged;
-          return `Staged changes:\n\`\`\`diff\n${output}\n\`\`\``;
+        const staged = child_process.execSync("git diff --cached", {
+          cwd: rootPath,
+          encoding: "utf-8",
+          timeout: 10000,
+          maxBuffer: 512 * 1024,
+        });
+
+        if (!unstaged.trim() && !staged.trim()) {
+          return "No changes (working tree and staging area are clean).";
         }
-        const output = result.length > 5000 ? result.slice(0, 5000) + "\n... [truncated]" : result;
-        return `Unstaged changes:\n\`\`\`diff\n${output}\n\`\`\``;
+
+        const parts: string[] = [];
+        if (staged.trim()) {
+          const s =
+            staged.length > 5000
+              ? staged.slice(0, 5000) + "\n... [truncated]"
+              : staged;
+          parts.push(`Staged changes:\n\`\`\`diff\n${s}\n\`\`\``);
+        }
+        if (unstaged.trim()) {
+          const u =
+            unstaged.length > 5000
+              ? unstaged.slice(0, 5000) + "\n... [truncated]"
+              : unstaged;
+          parts.push(`Unstaged changes:\n\`\`\`diff\n${u}\n\`\`\``);
+        }
+        return parts.join("\n\n");
       } catch (e) {
         return `Error running git diff: ${(e as Error).message}`;
       }
     }
 
+    /* ================================================================ */
+    /*  GIT COMMIT                                                       */
+    /* ================================================================ */
     case "git_commit": {
       const msg = toolCall.commitMessage || "";
       if (!msg) return "Error: No commit message provided.";
@@ -370,17 +667,133 @@ export async function executeToolCall(
         );
         return `Git commit successful:\n\`\`\`\n${result}\`\`\``;
       } catch (e) {
-        const err = e as { stderr?: string; stdout?: string; message: string };
+        const err = e as {
+          stderr?: string;
+          stdout?: string;
+          message: string;
+        };
         return `Git commit failed:\n\`\`\`\n${err.stderr || err.stdout || err.message}\n\`\`\``;
       }
     }
 
+    /* ================================================================ */
+    /*  TODO WRITE                                                       */
+    /* ================================================================ */
+    case "todo_write": {
+      const todos = toolCall.todos || [];
+      if (todos.length === 0) return "Todo list cleared.";
+
+      const lines = todos.map((t, i) => {
+        const icon =
+          t.status === "completed"
+            ? "[x]"
+            : t.status === "in_progress"
+              ? "[~]"
+              : "[ ]";
+        return `${i + 1}. ${icon} ${t.content}`;
+      });
+      return `Task list updated:\n${lines.join("\n")}`;
+    }
+
+    /* ================================================================ */
+    /*  MEMORY READ                                                      */
+    /* ================================================================ */
+    case "memory_read": {
+      if (!memoryMgr) return "Memory system not available.";
+      const query = toolCall.memoryQuery;
+      const typeFilter = toolCall.memoryType as MemoryType | undefined;
+
+      let results = query ? memoryMgr.search(query) : memoryMgr.getAll();
+      if (typeFilter) {
+        results = results.filter((m) => m.type === typeFilter);
+      }
+
+      if (results.length === 0) {
+        return query
+          ? `No memories found matching "${query}".`
+          : "No memories stored yet.";
+      }
+
+      const lines = results.map(
+        (m) => `- **${m.name}** [${m.type}]: ${m.content}`,
+      );
+      return `Memories (${results.length}):\n${lines.join("\n")}`;
+    }
+
+    /* ================================================================ */
+    /*  MEMORY WRITE                                                     */
+    /* ================================================================ */
+    case "memory_write": {
+      if (!memoryMgr) return "Memory system not available.";
+      const type = (toolCall.memoryType || "project") as MemoryType;
+      const name = toolCall.memoryName || "";
+      const description = toolCall.memoryDescription || "";
+      const content = toolCall.memoryContent || "";
+
+      if (!name) return "Error: Memory name is required.";
+      if (!content) return "Error: Memory content is required.";
+
+      const entry = memoryMgr.upsert(type, name, description, content);
+      return `Memory saved: **${entry.name}** [${entry.type}]`;
+    }
+
+    /* ================================================================ */
+    /*  MEMORY DELETE                                                    */
+    /* ================================================================ */
+    case "memory_delete": {
+      if (!memoryMgr) return "Memory system not available.";
+      const name = toolCall.memoryName || "";
+      if (!name) return "Error: Memory name is required.";
+
+      const removed = memoryMgr.remove(name);
+      return removed
+        ? `Memory "${name}" removed.`
+        : `No memory found with name "${name}".`;
+    }
+
     default:
-      return "Unknown tool type.";
+      return `Unknown tool type: ${toolCall.type}`;
   }
 }
 
-/** Background task tracking. */
+/* ================================================================== */
+/*  HTML text extraction for web_fetch                                 */
+/* ================================================================== */
+
+function extractTextFromHtml(html: string): string {
+  // Remove script and style blocks
+  let text = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
+  text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+
+  // Convert common block elements to newlines
+  text = text.replace(/<\/?(p|div|br|hr|h[1-6]|li|tr|td|th|blockquote|pre|section|article|header|footer|nav|aside|main)[^>]*>/gi, "\n");
+
+  // Convert links to markdown-ish format
+  text = text.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, "$2");
+
+  // Strip remaining tags
+  text = text.replace(/<[^>]+>/g, "");
+
+  // Decode common HTML entities
+  text = text.replace(/&amp;/g, "&");
+  text = text.replace(/&lt;/g, "<");
+  text = text.replace(/&gt;/g, ">");
+  text = text.replace(/&quot;/g, '"');
+  text = text.replace(/&#39;/g, "'");
+  text = text.replace(/&nbsp;/g, " ");
+
+  // Collapse whitespace
+  text = text.replace(/[ \t]+/g, " ");
+  text = text.replace(/\n{3,}/g, "\n\n");
+
+  return text.trim();
+}
+
+/* ================================================================== */
+/*  Background task tracking                                           */
+/* ================================================================== */
+
 type BackgroundTask = {
   cmd: string;
   status: "running" | "completed" | "failed";
@@ -388,7 +801,19 @@ type BackgroundTask = {
   exitCode?: number;
 };
 
+const MAX_BACKGROUND_TASKS = 100;
 const backgroundTasks = new Map<string, BackgroundTask>();
+
+function pruneBackgroundTasks() {
+  if (backgroundTasks.size <= MAX_BACKGROUND_TASKS) return;
+  const keys = Array.from(backgroundTasks.keys());
+  for (let i = 0; i < keys.length - MAX_BACKGROUND_TASKS; i++) {
+    const task = backgroundTasks.get(keys[i]);
+    if (task && task.status !== "running") {
+      backgroundTasks.delete(keys[i]);
+    }
+  }
+}
 
 function runCommandInBackground(
   cmd: string,
@@ -420,6 +845,7 @@ function runCommandInBackground(
     task.exitCode = code ?? 1;
     task.status = code === 0 ? "completed" : "failed";
     outputChannel.appendLine(`▶ [${taskId}] Exit code: ${code}`);
+    pruneBackgroundTasks();
     void vscode.window.showInformationMessage(
       `Background command ${task.status}: ${cmd.slice(0, 50)}`,
     );
@@ -438,9 +864,10 @@ export function checkBackgroundTask(taskId: string): string {
   const task = backgroundTasks.get(taskId);
   if (!task) return `No background task found with id: ${taskId}`;
 
-  const output = task.output.length > 5000
-    ? task.output.slice(-5000) + "\n... [showing last 5000 chars]"
-    : task.output;
+  const output =
+    task.output.length > 5000
+      ? task.output.slice(-5000) + "\n... [showing last 5000 chars]"
+      : task.output;
 
   return `Background task ${taskId} (${task.status}):\nCommand: \`${task.cmd}\`${task.exitCode !== undefined ? `\nExit code: ${task.exitCode}` : ""}\n\`\`\`\n${output}\n\`\`\``;
 }
@@ -450,6 +877,7 @@ function runCommandWithStreaming(
   cmd: string,
   cwd: string,
   outputChannel: vscode.OutputChannel,
+  timeoutMs = 120000,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     outputChannel.appendLine(`▶ Running: ${cmd}`);
@@ -480,8 +908,12 @@ function runCommandWithStreaming(
 
     const timeout = setTimeout(() => {
       proc.kill("SIGTERM");
-      reject({ message: `Command timed out after 120s: ${cmd}`, stderr, stdout });
-    }, 120000);
+      reject({
+        message: `Command timed out after ${timeoutMs / 1000}s: ${cmd}`,
+        stderr,
+        stdout,
+      });
+    }, timeoutMs);
 
     proc.on("close", (code) => {
       clearTimeout(timeout);
@@ -506,8 +938,16 @@ export async function executeToolCallWithHooks(
   session: ChatSession,
   toolCall: ToolCall,
   terminalMgr?: TerminalManager,
+  memoryMgr?: MemoryManager,
 ): Promise<string> {
-  const result = await executeToolCall(config, outputChannel, session, toolCall, terminalMgr);
+  const result = await executeToolCall(
+    config,
+    outputChannel,
+    session,
+    toolCall,
+    terminalMgr,
+    memoryMgr,
+  );
   void runHooks(config, outputChannel, "postToolUse", {
     tool: toolCall.type,
     file: toolCall.filePath,

@@ -360,7 +360,7 @@ export function getChatScript(brandIconUri: string): string {
             if (previewContainer) {
               previewContainer.remove();
             } else {
-              const editCalls = entry.toolCalls.filter(t => t.status === "pending" && (t.type === "edit_file" || t.type === "create_file"));
+              const editCalls = entry.toolCalls.filter(t => t.status === "pending" && (t.type === "edit_file" || t.type === "write_file"));
               if (editCalls.length) {
                 const preview = document.createElement("div");
                 preview.className = "multi-file-preview";
@@ -373,7 +373,7 @@ export function getChatScript(brandIconUri: string): string {
                   fileBlock.className = "multi-file-block";
                   const fileHeader = document.createElement("div");
                   fileHeader.className = "multi-file-file-header";
-                  fileHeader.textContent = (tc.type === "create_file" ? "[new] " : "") + (tc.filePath || "");
+                  fileHeader.textContent = (tc.type === "write_file" ? "[new] " : "") + (tc.filePath || "");
                   fileBlock.appendChild(fileHeader);
                   if (tc.type === "edit_file" && tc.search) {
                     const searchLines = tc.search.split("\\n");
@@ -392,7 +392,7 @@ export function getChatScript(brandIconUri: string): string {
                         fileBlock.appendChild(lineEl);
                       }
                     }
-                  } else if (tc.type === "create_file" && tc.content) {
+                  } else if (tc.type === "write_file" && tc.content) {
                     const contentLines = tc.content.split("\\n");
                     const maxLines = 20;
                     const showLines = contentLines.slice(0, maxLines);

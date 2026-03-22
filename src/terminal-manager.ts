@@ -89,7 +89,7 @@ export class TerminalManager {
     let output = "";
     const maxBuffer = 2 * 1024 * 1024; // 2MB
 
-    let timeoutHandle: ReturnType<typeof setTimeout>;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutHandle = setTimeout(
         () => reject(new Error(`Command timed out after ${timeout / 1000}s`)),
@@ -110,11 +110,14 @@ export class TerminalManager {
 
       await Promise.race([readPromise, timeoutPromise]);
     } catch (e) {
-      if ((e as Error).message.includes("timed out")) {
+      const message = (e as Error)?.message || "Unknown error";
+      if (message.includes("timed out")) {
         output += `\n[Command timed out after ${timeout / 1000}s]`;
+      } else {
+        output += `\n[Error: ${message}]`;
       }
     } finally {
-      clearTimeout(timeoutHandle!);
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     }
 
     // Strip ANSI escape codes
