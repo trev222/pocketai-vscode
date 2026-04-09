@@ -1,4 +1,4 @@
-# Harness Migration Plan 
+# Harness Migration Plan
 
 ## Goal
 
