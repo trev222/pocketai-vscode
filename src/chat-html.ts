@@ -68,26 +68,66 @@ export function getChatHtml(nonce: string, cspSource: string, brandIconUri: stri
     <!-- Messages -->
     <div class="messages" id="messages"></div>
 
+    <!-- Harness activity -->
+    <div class="harness-pane" id="harnessPane" style="display:none"></div>
+
     <!-- Composer -->
-    <div class="composer" style="position:relative;">
-      <div class="at-mention-dropdown" id="atMentionDropdown"></div>
-      <div class="image-preview" id="imagePreview" style="display:none"></div>
-      <div class="input-wrap" id="inputWrap">
-        <textarea id="prompt" rows="1" placeholder="Ask PocketAI... (@ to mention files, paste images)"></textarea>
-        <button class="send-btn" id="sendBtn" type="button" title="Send (Enter)">↑</button>
-      </div>
-      <div class="composer-footer">
-        <div class="composer-left">
-          <div class="mode-selector" id="modeSelector">
-            <button class="mode-btn active" data-mode="ask" title="Ask before making changes">Ask</button>
-            <button class="mode-btn" data-mode="auto" title="Apply changes automatically">Auto</button>
-            <button class="mode-btn" data-mode="plan" title="Plan changes without applying">Plan</button>
+    <div class="composer">
+      <div class="composer-inner">
+        <div class="at-mention-dropdown" id="atMentionDropdown"></div>
+        <input id="attachmentInput" type="file" multiple style="display:none" />
+        <div class="composer-surface">
+          <div class="attachment-preview" id="attachmentPreview" style="display:none"></div>
+          <div class="active-skills" id="activeSkills" style="display:none"></div>
+          <div class="input-wrap" id="inputWrap">
+            <textarea id="prompt" rows="1" placeholder="Ask PocketAI... (@ to mention files, paste or upload images/files)"></textarea>
           </div>
-        </div>
-        <div class="composer-right">
-          <select class="chat-model-select" id="modelSelect" title="Model for this chat"></select>
-          <select class="chat-reasoning-select" id="reasoningSelect" title="Reasoning for this chat" style="display:none"></select>
-          <div class="status-text" id="statusText"></div>
+          <div class="composer-footer">
+            <div class="composer-controls">
+              <div class="composer-menu" id="attachMenuWrap">
+                <button class="attach-btn" id="attachmentBtn" type="button" title="Add to message">+</button>
+                <div class="composer-popout" id="attachMenu">
+                  <button class="composer-menu-item" id="attachUploadAction" type="button">
+                    <span class="composer-menu-item-title">Upload From Computer</span>
+                    <span class="composer-menu-item-subtitle">Attach images or text-like files</span>
+                  </button>
+                </div>
+              </div>
+              <div class="composer-menu" id="modeMenuWrap">
+                <button class="mode-trigger" id="modeTrigger" type="button" title="Change mode">
+                  <span class="mode-trigger-label" id="modeTriggerLabel">Ask</span>
+                  <span class="mode-trigger-icon">✎</span>
+                </button>
+                <div class="composer-popout" id="modeMenu">
+                  <button class="composer-menu-item mode-menu-item" data-mode="ask" type="button">Ask</button>
+                  <button class="composer-menu-item mode-menu-item" data-mode="auto" type="button">Auto</button>
+                  <button class="composer-menu-item mode-menu-item" data-mode="plan" type="button">Plan</button>
+                </div>
+              </div>
+              <div class="composer-models">
+                <div class="composer-menu model-menu" id="modelMenuWrap">
+                  <button class="model-trigger" id="modelTrigger" type="button" title="Choose model">
+                    <span class="model-trigger-label" id="modelTriggerLabel">No models available</span>
+                    <span class="model-trigger-caret">▾</span>
+                  </button>
+                  <div class="composer-popout model-popout" id="modelMenu"></div>
+                </div>
+                <div class="composer-menu reasoning-menu" id="reasoningMenuWrap" style="display:none">
+                  <button class="model-trigger" id="reasoningTrigger" type="button" title="Choose reasoning effort">
+                    <span class="model-trigger-label" id="reasoningTriggerLabel">Auto</span>
+                    <span class="model-trigger-caret">▾</span>
+                  </button>
+                  <div class="composer-popout reasoning-popout" id="reasoningMenu"></div>
+                </div>
+                <select class="chat-model-select" id="modelSelect" title="Model for this chat" style="display:none"></select>
+                <select class="chat-reasoning-select" id="reasoningSelect" title="Reasoning for this chat" style="display:none"></select>
+              </div>
+            </div>
+            <div class="composer-actions">
+              <div class="status-text" id="statusText"></div>
+              <button class="send-btn" id="sendBtn" type="button" title="Send (Enter)">↑</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

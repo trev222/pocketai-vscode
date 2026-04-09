@@ -6,11 +6,11 @@ import type {
 } from "./types";
 
 import {
+  COMPAT_PROJECT_INSTRUCTIONS_FILES,
   DEFAULT_MAX_TOKENS,
   DEFAULT_CONTEXT_WINDOW_SIZE,
   DEFAULT_PROJECT_INSTRUCTIONS_FILE,
   DEFAULT_SYSTEM_PROMPT,
-  VSCODE_SKILL_COMMANDS,
 } from "./constants";
 
 import { normalizeBaseUrl, getNonce } from "./helpers";
@@ -20,7 +20,12 @@ import { getChatHtml } from "./chat-html";
 import { SessionManager } from "./session-manager";
 import { EndpointManager } from "./endpoint-manager";
 import { DiffViewer } from "./diff-viewer";
-import { executeToolCallWithHooks, clearReadTracking } from "./tool-executor";
+import {
+  clearReadTracking,
+  restoreBackgroundTaskSnapshots,
+  subscribeToBackgroundTasks,
+  type BackgroundTaskSnapshot,
+} from "./tool-executor";
 import { runToolLoop, type ToolLoopDeps } from "./tool-loop";
 import { type StreamingDeps } from "./streaming";
 import {
@@ -36,6 +41,38 @@ import { MemoryManager } from "./memory-manager";
 import { handleSlashCommand, type SlashCommandDeps } from "./slash-commands";
 import { setupChatMessageHandler, type MessageHandlerDeps } from "./message-handler";
 import { CodexBridgeManager, CODEX_BRIDGE_URL } from "./codex-bridge-manager";
+import {
+  buildCodexReasoningControlsState,
+  buildProviderChatControlsState,
+} from "./provider-chat-state";
+import { LOCAL_POCKETAI_URL } from "./provider-capabilities";
+import {
+  applyHarnessEventToSession,
+  clearPendingToolState,
+  syncHarnessPendingState,
+  upsertBackgroundTask,
+} from "./harness/state";
+import type { HarnessEvent } from "./harness/types";
+import { DefaultHarnessToolRuntime } from "./harness/runtime";
+import { createHarnessToolRegistry } from "./harness/tools/registry";
+import {
+  detectSkillPromptIntent,
+  formatSkillAvailabilityMessage,
+  formatSkillListMessage,
+  resolveSkillByIntent,
+} from "./harness/skills/intents";
+import {
+  getBuiltinHarnessSkillBySlashCommand,
+  inferBuiltinHarnessSkillFromPrompt,
+} from "./harness/skills/builtins";
+import {
+  activateSessionSkill,
+  clearSessionSkills,
+  formatActiveSkillsStatus,
+} from "./harness/skills/active";
+import { buildSkillPreflightContext } from "./harness/skills/preflight";
+import { listHarnessSkills } from "./harness/skills/registry";
+import { buildHarnessRuntimeHealth } from "./harness/runtime-health";
 
 /* ────────────────────────────── Activation ────────────────────────────── */
 
@@ -128,6 +165,9 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.inlineDiffMgr = new InlineDiffManager(context);
     this.terminalMgr = new TerminalManager(this.outputChannel);
     this.codexBridgeMgr = new CodexBridgeManager(context, this.outputChannel);
+    context.subscriptions.push(
+      subscribeToBackgroundTasks((task) => this.handleBackgroundTaskUpdate(task)),
+    );
 
     // Initialize memory manager if workspace is available
     const rootPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -146,13 +186,27 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       if (sessionId) this.handleToolApproval(sessionId, toolCallId, false);
     };
 
-    this.sessionMgr.restoreState();
+    const normalizedRestoredTasks = this.sessionMgr.restoreState();
+    restoreBackgroundTaskSnapshots(
+      Array.from(this.sessionMgr.sessions.values()).flatMap((session) =>
+        session.harnessState.backgroundTasks.map((task) => ({
+          ...task,
+          sessionId: session.id,
+        })),
+      ),
+    );
     if (!this.sessionMgr.sessions.size) {
       const session = this.sessionMgr.createSession(this.endpointMgr.models);
       this.sessionMgr.sidebarSessionId = session.id;
       void this.sessionMgr.saveState();
     }
+    if (normalizedRestoredTasks) {
+      void this.sessionMgr.saveState();
+    }
     this.endpointMgr.initEndpoints();
+    if (this.syncSessionEndpointSelections()) {
+      void this.sessionMgr.saveState();
+    }
     this.startEndpointHealthChecks();
     this.endpointMgr.initStatusBar(
       this.sessionMgr.sidebarSessionId,
@@ -168,8 +222,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       () => this.pushSettingsState(),
       async (state) => {
         const codexIsActive =
-          normalizeBaseUrl(this.endpointMgr.activeEndpointUrl) ===
-          normalizeBaseUrl(CODEX_BRIDGE_URL);
+          this.endpointMgr.getActiveEndpointCapabilities().kind ===
+          "codex-bridge";
         if (
           state.loggedIn &&
           state.bridgeRunning &&
@@ -205,6 +259,40 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     return undefined;
   }
 
+  private handleHarnessEvent(event: HarnessEvent) {
+    const session = this.sessionMgr.requireSession(event.sessionId);
+    if (!session) return;
+
+    applyHarnessEventToSession(session, event);
+    this.postState();
+  }
+
+  private handleBackgroundTaskUpdate(task: BackgroundTaskSnapshot) {
+    const session = this.sessionMgr.requireSession(task.sessionId);
+    if (!session) return;
+
+    const previousTask = session.harnessState.backgroundTasks.find(
+      (item) => item.id === task.id,
+    );
+    upsertBackgroundTask(session, {
+      id: task.id,
+      command: task.command,
+      status: task.status,
+      outputPreview: task.outputPreview,
+      exitCode: task.exitCode,
+      updatedAt: task.updatedAt,
+      cwd: task.cwd,
+    });
+    const shouldPersist =
+      !previousTask ||
+      previousTask.status !== task.status ||
+      previousTask.cwd !== task.cwd;
+    if (shouldPersist) {
+      void this.sessionMgr.saveState();
+    }
+    this.postState();
+  }
+
   private get config() {
     return vscode.workspace.getConfiguration("pocketai");
   }
@@ -222,6 +310,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
         (this.endpointMgr.getActiveEndpointConfig().reasoningEffort ?? "").trim(),
       getActiveMaxTokens: () =>
         this.endpointMgr.getActiveEndpointConfig().maxTokens ?? DEFAULT_MAX_TOKENS,
+      getActiveEndpointCapabilities: () =>
+        this.endpointMgr.getActiveEndpointCapabilities(),
       broadcastToWebviews: (msg) => this.broadcastToWebviews(msg),
       memoryContext: this.memoryMgr?.buildMemoryContext() || "",
     };
@@ -238,6 +328,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       inlineDiffMgr: this.inlineDiffMgr,
       terminalMgr: this.terminalMgr,
       memoryMgr: this.memoryMgr,
+      onHarnessEvent: (event) => this.handleHarnessEvent(event),
       autoCompact: async (session) => {
         const contextWindow =
           this.config.get<number>("contextWindowSize") ?? DEFAULT_CONTEXT_WINDOW_SIZE;
@@ -288,14 +379,17 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
   }
 
-  private isCodexEndpointUrl(url: string): boolean {
-    return normalizeBaseUrl(url) === normalizeBaseUrl(CODEX_BRIDGE_URL);
+  private getEndpointCapabilities(url: string) {
+    return this.endpointMgr.getEndpointCapabilities(url);
   }
 
   private hasCodexEndpoint(): boolean {
     return this.endpointMgr
       .getEndpoints()
-      .some((endpoint) => this.isCodexEndpointUrl(endpoint.url));
+      .some(
+        (endpoint) =>
+          this.getEndpointCapabilities(endpoint.url).requiresBridgeBootstrap,
+      );
   }
 
   private async autoConnectConfiguredCodexBridge() {
@@ -309,7 +403,9 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     });
 
     this.startEndpointHealthChecks();
-    if (this.isCodexEndpointUrl(this.endpointMgr.activeEndpointUrl)) {
+    if (
+      this.endpointMgr.getActiveEndpointCapabilities().requiresBridgeBootstrap
+    ) {
       await this.refreshModels();
       return;
     }
@@ -320,26 +416,49 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
   private async handleEndpointSelection(endpointUrl: string) {
     this.endpointMgr.switchEndpoint(endpointUrl);
-    if (this.isCodexEndpointUrl(endpointUrl)) {
+    if (this.syncSessionEndpointSelections()) {
+      await this.sessionMgr.saveState();
+    }
+    if (this.getEndpointCapabilities(endpointUrl).requiresBridgeBootstrap) {
       await this.autoConnectConfiguredCodexBridge();
       return;
     }
     await this.refreshModels();
   }
 
-  /* ── Project Instructions (.pocketai.md) ── */
+  /* ── Project Instructions (.pocketai.md / AGENTS.md / CLAUDE.md) ── */
 
-  private async loadProjectInstructions() {
-    const fileName =
+  private getProjectInstructionCandidates() {
+    const configuredFile =
       this.config.get<string>("projectInstructionsFile") ??
       DEFAULT_PROJECT_INSTRUCTIONS_FILE;
+    return Array.from(
+      new Set([
+        configuredFile.trim(),
+        ...COMPAT_PROJECT_INSTRUCTIONS_FILES,
+      ].filter(Boolean)),
+    );
+  }
+
+  private async loadProjectInstructions() {
     try {
-      const files = await vscode.workspace.findFiles(fileName, null, 1);
-      if (files.length) {
+      const sections: string[] = [];
+      const loadedSources: string[] = [];
+
+      for (const fileName of this.getProjectInstructionCandidates()) {
+        const files = await vscode.workspace.findFiles(fileName, null, 1);
+        if (!files.length) continue;
         const content = await vscode.workspace.fs.readFile(files[0]);
-        this.projectInstructionsCache = Buffer.from(content).toString("utf-8");
+        const text = Buffer.from(content).toString("utf-8").trim();
+        if (!text) continue;
+        sections.push(`[${fileName}]\n${text}`);
+        loadedSources.push(fileName);
+      }
+
+      if (sections.length) {
+        this.projectInstructionsCache = sections.join("\n\n");
         this.outputChannel.appendLine(
-          `Loaded project instructions from ${fileName} (${this.projectInstructionsCache.length} chars)`,
+          `Loaded project guidance from ${loadedSources.join(", ")} (${this.projectInstructionsCache.length} chars)`,
         );
       } else {
         this.projectInstructionsCache = "";
@@ -350,27 +469,27 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   }
 
   private watchProjectInstructions() {
-    const fileName =
-      this.config.get<string>("projectInstructionsFile") ??
-      DEFAULT_PROJECT_INSTRUCTIONS_FILE;
     this.projectInstructionsWatcher?.dispose();
     for (const d of this.projectInstructionsWatcherDisposables) d.dispose();
     this.projectInstructionsWatcherDisposables = [];
 
-    this.projectInstructionsWatcher = vscode.workspace.createFileSystemWatcher(
-      `**/${fileName}`,
-    );
-    this.projectInstructionsWatcherDisposables.push(
-      this.projectInstructionsWatcher.onDidChange(() =>
-        this.loadProjectInstructions(),
-      ),
-      this.projectInstructionsWatcher.onDidCreate(() =>
-        this.loadProjectInstructions(),
-      ),
-      this.projectInstructionsWatcher.onDidDelete(() => {
-        this.projectInstructionsCache = "";
-      }),
-    );
+    for (const fileName of this.getProjectInstructionCandidates()) {
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        `**/${fileName}`,
+      );
+      this.projectInstructionsWatcherDisposables.push(
+        watcher,
+        watcher.onDidChange(() => {
+          void this.loadProjectInstructions().then(() => this.postState());
+        }),
+        watcher.onDidCreate(() => {
+          void this.loadProjectInstructions().then(() => this.postState());
+        }),
+        watcher.onDidDelete(() => {
+          void this.loadProjectInstructions().then(() => this.postState());
+        }),
+      );
+    }
   }
 
   /* ── MCP Servers ── */
@@ -406,12 +525,31 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.initializeSettingsWebview(webviewView.webview);
   }
 
+  private getPanelViewColumn() {
+    for (const panel of this.panelSessions.keys()) {
+      if (panel.active && panel.viewColumn !== undefined) {
+        return panel.viewColumn;
+      }
+    }
+
+    const panels = Array.from(this.panelSessions.keys());
+    for (let index = panels.length - 1; index >= 0; index -= 1) {
+      const panel = panels[index];
+      if (panel.viewColumn !== undefined) {
+        return panel.viewColumn;
+      }
+    }
+
+    return vscode.ViewColumn.Beside;
+  }
+
   async openPanel() {
     const session = this.sessionMgr.createSession(this.endpointMgr.models);
+    session.selectedEndpoint = this.endpointMgr.activeEndpointUrl;
     const panel = vscode.window.createWebviewPanel(
       PocketAIViewProvider.panelType,
       this.getPanelTitle(session.id),
-      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+      { viewColumn: this.getPanelViewColumn(), preserveFocus: false },
       { enableScripts: true, retainContextWhenHidden: true },
     );
     panel.iconPath = vscode.Uri.joinPath(
@@ -507,7 +645,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
             this.startEndpointHealthChecks();
             this.pushSettingsState();
             this.updateStatusBar();
-            if (this.isCodexEndpointUrl(url)) {
+            if (this.getEndpointCapabilities(url).requiresBridgeBootstrap) {
               void this.autoConnectConfiguredCodexBridge();
             }
             break;
@@ -519,7 +657,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
               (ep) => normalizeBaseUrl(ep.url) === url,
             );
             if (!target) break;
-            if (target.name === "Local PocketAI") {
+            if (this.getEndpointCapabilities(url).kind === "local-pocketai") {
               void vscode.window.showWarningMessage(
                 "Local PocketAI is built in and can't be removed.",
               );
@@ -675,14 +813,22 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   private pushSettingsState() {
     if (!this.settingsWebview) return;
     const configEndpoints = this.endpointMgr.getEndpoints();
+    const codexState = this.codexBridgeMgr.getState(this.endpointMgr);
+    const codexReasoningControls = buildCodexReasoningControlsState({
+      selectedModel: codexState.selectedModel,
+      selectedReasoningEffort: codexState.selectedReasoningEffort,
+      codexState,
+    });
     const endpoints = Array.from(
       this.endpointMgr.endpointHealthMap.values(),
     ).map((health) => {
       const epConfig = configEndpoints.find(
         (ep) => normalizeBaseUrl(ep.url) === health.url,
       );
+      const capabilities = this.endpointMgr.getEndpointCapabilities(health.url);
       return {
         ...health,
+        providerKind: capabilities.kind,
         model: epConfig?.model ?? "",
         reasoningEffort: epConfig?.reasoningEffort ?? "",
         maxTokens: epConfig?.maxTokens ?? 4096,
@@ -700,7 +846,12 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
           this.config.get<boolean>("includeWorkspaceContext") ?? true,
       },
       models: this.endpointMgr.models,
-      codex: this.codexBridgeMgr.getState(this.endpointMgr),
+      codex: {
+        ...codexState,
+        selectedReasoningEffort:
+          codexReasoningControls.selectedReasoningEffort,
+        reasoningOptions: codexReasoningControls.reasoningOptions,
+      },
     });
   }
 
@@ -710,10 +861,12 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     sessionId: string,
     prompt: string,
     images?: import("./types").ImageAttachment[],
+    files?: import("./types").FileAttachment[],
   ) {
     const session = this.sessionMgr.requireSession(sessionId);
+    let loopResult: Awaited<ReturnType<typeof runToolLoop>> | undefined;
     let trimmed = prompt.trim();
-    if (!session || (!trimmed && !images?.length) || session.busy) return;
+    if (!session || (!trimmed && !images?.length && !files?.length) || session.busy) return;
 
     // Slash commands
     if (trimmed.startsWith("/")) {
@@ -724,16 +877,34 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0].toLowerCase();
       const arg = parts.slice(1).join(" ").trim();
-      const skillDef = VSCODE_SKILL_COMMANDS[cmd];
+      const skillDef = getBuiltinHarnessSkillBySlashCommand(cmd);
       if (skillDef) {
-        session.activeSkillInjection = skillDef.injection;
+        activateSessionSkill(session, skillDef, arg || undefined);
         if (!arg) {
-          session.status = `${skillDef.name} skill active — type your prompt.`;
+          session.status = formatActiveSkillsStatus(session.activeSkills);
           this.sessionMgr.touchSession(session);
           this.postState();
           return;
         }
         trimmed = arg;
+      }
+    }
+
+    const skillIntent = detectSkillPromptIntent(trimmed);
+    if (skillIntent) {
+      const handled = await this.handleSkillPromptIntent(session, skillIntent, trimmed);
+      if (handled.handled) {
+        return;
+      }
+      if (handled.nextPrompt !== undefined) {
+        trimmed = handled.nextPrompt;
+      }
+    }
+
+    if (!session.activeSkills.length && trimmed.length >= 8) {
+      const inferredSkill = inferBuiltinHarnessSkillFromPrompt(trimmed);
+      if (inferredSkill) {
+        activateSessionSkill(session, inferredSkill);
       }
     }
 
@@ -748,17 +919,34 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     }
 
     const resolvedPrompt = await injectAtMentionContent(trimmed, this.config);
-    const userEntry: import("./types").ChatEntry = { role: "user", content: resolvedPrompt };
+    const userEntry: import("./types").ChatEntry = {
+      role: "user",
+      content: resolvedPrompt,
+    };
     if (images?.length) {
       userEntry.images = images;
+    }
+    if (files?.length) {
+      userEntry.files = files;
     }
     session.transcript.push(userEntry);
     this.sessionMgr.autoTitle(session, trimmed);
     this.updateBoundTitles(session.id);
     session.busy = true;
-    session.status = "Thinking...";
+    session.status = session.activeSkills.length
+      ? "Preparing skill context..."
+      : "Thinking...";
     this.sessionMgr.touchSession(session);
     this.postState();
+
+    if (session.activeSkills.length) {
+      session.skillPreflightContext = await buildSkillPreflightContext(
+        session,
+        this.getToolLoopDeps(),
+      );
+      session.status = "Thinking...";
+      this.postState();
+    }
 
     session.currentRequest = new AbortController();
     clearReadTracking();
@@ -767,8 +955,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     );
 
     try {
-      await runToolLoop(session, this.getToolLoopDeps());
-      session.status = "Ready";
+      loopResult = await runToolLoop(session, this.getToolLoopDeps());
+      if (loopResult.stoppedBecause !== "pending_approval") {
+        session.status = "Ready";
+      }
       this.outputChannel.appendLine(
         `← Response received [${session.id}]`,
       );
@@ -794,12 +984,88 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     } finally {
       session.busy = false;
       session.currentRequest = undefined;
-      session.activeSkillInjection = undefined;
-      this.notifyCompletion(session);
+      if (loopResult?.stoppedBecause !== "pending_approval") {
+        clearSessionSkills(session);
+        this.notifyCompletion(session);
+      }
       this.sessionMgr.touchSession(session);
       await this.sessionMgr.saveState();
       this.postState();
     }
+  }
+
+  private async handleSkillPromptIntent(
+    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
+    intent: ReturnType<typeof detectSkillPromptIntent>,
+    originalPrompt: string,
+  ): Promise<{ handled: boolean; nextPrompt?: string }> {
+    if (!intent) {
+      return { handled: false };
+    }
+
+    const skills = listHarnessSkills();
+
+    if (intent.type === "list-skills") {
+      session.transcript.push({ role: "user", content: originalPrompt });
+      session.transcript.push({
+        role: "assistant",
+        content: formatSkillListMessage(skills),
+      });
+      session.status = "Ready";
+      this.sessionMgr.autoTitle(session, originalPrompt);
+      this.updateBoundTitles(session.id);
+      this.sessionMgr.touchSession(session);
+      await this.sessionMgr.saveState();
+      this.postState();
+      return { handled: true };
+    }
+
+    if (intent.type === "check-skill") {
+      const skill = resolveSkillByIntent(skills, intent.skillId);
+      session.transcript.push({ role: "user", content: originalPrompt });
+      session.transcript.push({
+        role: "assistant",
+        content: formatSkillAvailabilityMessage(skill, intent.skillId),
+      });
+      session.status = "Ready";
+      this.sessionMgr.autoTitle(session, originalPrompt);
+      this.updateBoundTitles(session.id);
+      this.sessionMgr.touchSession(session);
+      await this.sessionMgr.saveState();
+      this.postState();
+      return { handled: true };
+    }
+
+    if (intent.type === "activate-skill") {
+      const skill = resolveSkillByIntent(skills, intent.skillId);
+      if (!skill) {
+        session.transcript.push({ role: "user", content: originalPrompt });
+        session.transcript.push({
+          role: "assistant",
+          content: formatSkillAvailabilityMessage(undefined, intent.skillId),
+        });
+        session.status = "Ready";
+        this.sessionMgr.autoTitle(session, originalPrompt);
+        this.updateBoundTitles(session.id);
+        this.sessionMgr.touchSession(session);
+        await this.sessionMgr.saveState();
+        this.postState();
+        return { handled: true };
+      }
+
+      activateSessionSkill(session, skill, intent.remainder || undefined);
+      if (!intent.remainder) {
+        session.status = formatActiveSkillsStatus(session.activeSkills);
+        this.sessionMgr.touchSession(session);
+        await this.sessionMgr.saveState();
+        this.postState();
+        return { handled: true };
+      }
+
+      return { handled: false, nextPrompt: intent.remainder };
+    }
+
+    return { handled: false };
   }
 
   private getSlashCommandDeps(): SlashCommandDeps {
@@ -808,9 +1074,11 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       endpointMgr: this.endpointMgr,
       memoryMgr: this.memoryMgr,
       config: this.config,
+      outputChannel: this.outputChannel,
       getStreamingDeps: () => this.getStreamingDeps(),
       estimateTokens: (s) => this.estimateTokens(s),
       refreshModels: () => this.refreshModels(),
+      selectEndpoint: (endpointUrl) => this.handleEndpointSelection(endpointUrl),
       postState: () => this.postState(),
       updateStatusBar: () => this.updateStatusBar(),
       openForkedPanel: (f) => this.openForkedPanel(f),
@@ -824,13 +1092,15 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     return handleSlashCommand(session, input, this.getSlashCommandDeps());
   }
 
-  private async executeMcpToolCall(tc: import("./types").ToolCall): Promise<string> {
-    try {
-      const args = (tc as { mcpArgs?: Record<string, unknown> }).mcpArgs ?? {};
-      return await this.mcpManager.executeTool(tc.type, args);
-    } catch (e) {
-      return `MCP error: ${(e as Error).message}`;
-    }
+  private async executeApprovedToolCall(
+    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
+    tc: import("./types").ToolCall,
+  ): Promise<string> {
+    const runtime = new DefaultHarnessToolRuntime(
+      this.getToolLoopDeps(),
+      createHarnessToolRegistry(this.getToolLoopDeps()),
+    );
+    return runtime.execute(session, tc);
   }
 
   private async handleToolApproval(
@@ -851,21 +1121,22 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
         if (approved) {
           tc.status = "approved";
-          const result = this.mcpManager.isMcpTool(tc.type)
-            ? await this.executeMcpToolCall(tc)
-            : await executeToolCallWithHooks(
-                this.config,
-                this.outputChannel,
-                session,
-                tc,
-                this.terminalMgr,
-                this.memoryMgr,
-              );
-          tc.result = result;
-          tc.status = "executed";
-          session.transcript.push({ role: "tool", content: result });
+          try {
+            const result = await this.executeApprovedToolCall(session, tc);
+            tc.result = result;
+            tc.status = "executed";
+            session.transcript.push({ role: "tool", content: result });
+          } catch (error) {
+            tc.status = "error";
+            tc.result =
+              error instanceof Error
+                ? `Tool execution error: ${error.message}`
+                : "Tool execution error.";
+            session.transcript.push({ role: "tool", content: tc.result });
+          }
         } else {
           tc.status = "rejected";
+          clearPendingToolState(session, tc.id);
           tc.result = "Edit rejected by user.";
           session.transcript.push({
             role: "tool",
@@ -878,7 +1149,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
         this.postState();
 
         const allResolved = entry.toolCalls!.every(
-          (t) => t.status === "executed" || t.status === "rejected",
+          (t) =>
+            t.status === "executed" ||
+            t.status === "rejected" ||
+            t.status === "error",
         );
         if (allResolved && !session.busy) {
           this.continueAfterToolResults(session);
@@ -905,21 +1179,22 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
         if (approved) {
           tc.status = "approved";
-          const result = this.mcpManager.isMcpTool(tc.type)
-            ? await this.executeMcpToolCall(tc)
-            : await executeToolCallWithHooks(
-                this.config,
-                this.outputChannel,
-                session,
-                tc,
-                this.terminalMgr,
-                this.memoryMgr,
-              );
-          tc.result = result;
-          tc.status = "executed";
-          session.transcript.push({ role: "tool", content: result });
+          try {
+            const result = await this.executeApprovedToolCall(session, tc);
+            tc.result = result;
+            tc.status = "executed";
+            session.transcript.push({ role: "tool", content: result });
+          } catch (error) {
+            tc.status = "error";
+            tc.result =
+              error instanceof Error
+                ? `Tool execution error: ${error.message}`
+                : "Tool execution error.";
+            session.transcript.push({ role: "tool", content: tc.result });
+          }
         } else {
           tc.status = "rejected";
+          clearPendingToolState(session, tc.id);
           tc.result = "Edit rejected by user.";
           session.transcript.push({
             role: "tool",
@@ -941,14 +1216,17 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   private async continueAfterToolResults(
     session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
   ) {
+    let loopResult: Awaited<ReturnType<typeof runToolLoop>> | undefined;
     session.busy = true;
     session.status = "Thinking...";
     session.currentRequest = new AbortController();
     this.postState();
 
     try {
-      await runToolLoop(session, this.getToolLoopDeps());
-      session.status = "Ready";
+      loopResult = await runToolLoop(session, this.getToolLoopDeps());
+      if (loopResult.stoppedBecause !== "pending_approval") {
+        session.status = "Ready";
+      }
     } catch (error) {
       if ((error as Error).name === "AbortError") {
         session.status = "Cancelled.";
@@ -968,7 +1246,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     } finally {
       session.busy = false;
       session.currentRequest = undefined;
-      this.notifyCompletion(session);
+      if (loopResult?.stoppedBecause !== "pending_approval") {
+        clearSessionSkills(session);
+        this.notifyCompletion(session);
+      }
       this.sessionMgr.touchSession(session);
       await this.sessionMgr.saveState();
       this.postState();
@@ -988,8 +1269,20 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
   /* ── Session helpers ── */
 
+  private syncSessionEndpointSelections() {
+    let changed = false;
+    const activeEndpointUrl = this.endpointMgr.activeEndpointUrl;
+    for (const session of this.sessionMgr.sessions.values()) {
+      if (session.selectedEndpoint === activeEndpointUrl) continue;
+      session.selectedEndpoint = activeEndpointUrl;
+      changed = true;
+    }
+    return changed;
+  }
+
   private createSessionForPanel(panel: vscode.WebviewPanel): string {
     const session = this.sessionMgr.createSession(this.endpointMgr.models);
+    session.selectedEndpoint = this.endpointMgr.activeEndpointUrl;
     this.panelSessions.set(panel, session.id);
     panel.title = this.getPanelTitle(session.id);
     this.postState();
@@ -1010,6 +1303,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       this.endpointMgr.models,
     );
     if (!fallbackId) return;
+
+    if (this.syncSessionEndpointSelections()) {
+      void this.sessionMgr.saveState();
+    }
 
     for (const [panel, pSessionId] of this.panelSessions.entries()) {
       if (pSessionId === sessionId) {
@@ -1033,7 +1330,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     const panel = vscode.window.createWebviewPanel(
       PocketAIViewProvider.panelType,
       this.getPanelTitle(forked.id),
-      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+      { viewColumn: this.getPanelViewColumn(), preserveFocus: false },
       { enableScripts: true, retainContextWhenHidden: true },
     );
     panel.iconPath = vscode.Uri.joinPath(
@@ -1105,36 +1402,38 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   private postStateToWebview(webview: vscode.Webview, sessionId: string) {
     const session = this.sessionMgr.requireSession(sessionId);
     if (!session) return;
-    const isCodexEndpoint =
-      normalizeBaseUrl(this.endpointMgr.activeEndpointUrl) ===
-      normalizeBaseUrl(CODEX_BRIDGE_URL);
-    const codexState = isCodexEndpoint
+    syncHarnessPendingState(session);
+    const endpointCapabilities = this.endpointMgr.getActiveEndpointCapabilities();
+    const codexState = endpointCapabilities.kind === "codex-bridge"
       ? this.codexBridgeMgr.getState(this.endpointMgr)
       : undefined;
-    const defaultCodexModel =
-      codexState?.models.find((model) => model.isDefault) ?? codexState?.models[0];
-    const effectiveCodexModelId = session.selectedModel || defaultCodexModel?.id || "";
-    const reasoningModel =
-      codexState?.models.find((model) => model.id === effectiveCodexModelId) ??
-      defaultCodexModel;
-    const reasoningOptions =
-      reasoningModel?.supportedReasoningEfforts.map((option) => option.reasoningEffort) ?? [];
-    const selectedReasoningEffort =
-      session.selectedReasoningEffort &&
-      reasoningOptions.includes(session.selectedReasoningEffort)
-        ? session.selectedReasoningEffort
-        : "";
+    const modelControls = buildProviderChatControlsState({
+      endpointUrl: this.endpointMgr.activeEndpointUrl,
+      structuredToolsEnabled:
+        this.config.get<boolean>("useStructuredTools", true),
+      availableModels: this.endpointMgr.models,
+      session,
+      codexState,
+    });
 
     const contextWindowSize =
       this.config.get<number>("contextWindowSize") ?? DEFAULT_CONTEXT_WINDOW_SIZE;
+    const contextTokenEstimate = this.estimateTokens(session);
+    const runtimeHealth = buildHarnessRuntimeHealth({
+      session,
+      endpointMgr: this.endpointMgr,
+      estimatedTokens: contextTokenEstimate,
+      contextWindowSize,
+    });
     webview.postMessage({
       type: "state",
       transcript: session.transcript,
-      models: this.endpointMgr.models,
-      selectedModel: session.selectedModel,
-      selectedReasoningEffort,
-      showReasoningControl: isCodexEndpoint,
-      reasoningOptions,
+      models: modelControls.models,
+      selectedModel: modelControls.selectedModel,
+      providerKind: modelControls.providerKind,
+      selectedReasoningEffort: modelControls.selectedReasoningEffort,
+      showReasoningControl: modelControls.showReasoningControl,
+      reasoningOptions: modelControls.reasoningOptions,
       endpoints: Array.from(this.endpointMgr.endpointHealthMap.values()),
       selectedEndpoint: this.endpointMgr.activeEndpointUrl,
       status: session.status,
@@ -1143,14 +1442,23 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       activeSessionId: session.id,
       mode: session.mode,
       diagnostics: buildDiagnostics(
-        this.endpointMgr.baseUrl,
+        this.endpointMgr.baseUrl || LOCAL_POCKETAI_URL,
         this.endpointMgr.statusSummary,
         this.endpointMgr.models,
       ),
       projectInstructionsLoaded: !!this.projectInstructionsCache,
-      contextTokenEstimate: this.estimateTokens(session),
+      contextTokenEstimate,
       contextWindowSize,
       cumulativeTokens: session.cumulativeTokens,
+      activeSkills: session.activeSkills.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        source: skill.source,
+        note: skill.note,
+      })),
+      harnessState: session.harnessState,
+      runtimeHealth,
     } satisfies ExtensionToWebviewMessage);
   }
 
@@ -1169,7 +1477,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       diffViewer: this.diffViewer,
       outputChannel: this.outputChannel,
       webviews: this.webviews,
-      sendPrompt: (sid, prompt, images) => this.sendPrompt(sid, prompt, images),
+      sendPrompt: (sid, prompt, images, files) =>
+        this.sendPrompt(sid, prompt, images, files),
       handleUseSelection: (sid) => this.handleUseSelection(sid),
       handleToolApproval: (sid, tcId, approved) =>
         this.handleToolApproval(sid, tcId, approved),

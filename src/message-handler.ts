@@ -11,6 +11,12 @@ import { rewindToCheckpoint } from "./checkpoints";
 import type { SessionManager } from "./session-manager";
 import type { EndpointManager } from "./endpoint-manager";
 import type { DiffViewer } from "./diff-viewer";
+import { clearSessionSkills, removeSessionSkill } from "./harness/skills/active";
+import {
+  cancelBackgroundTask,
+  removeBackgroundTasks,
+  rerunBackgroundTask,
+} from "./tool-executor";
 
 export interface MessageHandlerDeps {
   sessionMgr: SessionManager;
@@ -22,6 +28,7 @@ export interface MessageHandlerDeps {
     sessionId: string,
     prompt: string,
     images?: import("./types").ImageAttachment[],
+    files?: import("./types").FileAttachment[],
   ) => Promise<void>;
   handleUseSelection: (sessionId: string) => Promise<void>;
   handleToolApproval: (
@@ -63,7 +70,12 @@ export function setupChatMessageHandler(
           return;
 
         case "sendPrompt":
-          await deps.sendPrompt(sessionId, message.prompt, message.images);
+          await deps.sendPrompt(
+            sessionId,
+            message.prompt,
+            message.images,
+            message.files,
+          );
           return;
 
         case "selectModel": {
@@ -78,6 +90,9 @@ export function setupChatMessageHandler(
         case "selectReasoningEffort": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
+          if (!deps.endpointMgr.getActiveEndpointCapabilities().supportsReasoningEffort) {
+            return;
+          }
           deps.sessionMgr.setSessionReasoningEffort(
             session,
             message.reasoningEffort,
@@ -100,6 +115,7 @@ export function setupChatMessageHandler(
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
           session.transcript = [];
+          clearSessionSkills(session);
           session.status = "Cleared.";
           deps.sessionMgr.touchSession(session);
           await deps.sessionMgr.saveState();
@@ -292,6 +308,88 @@ export function setupChatMessageHandler(
           if (url) {
             void vscode.env.openExternal(vscode.Uri.parse(url));
           }
+          return;
+        }
+
+        case "removeActiveSkill": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session || session.busy) return;
+          removeSessionSkill(session, message.skillId);
+          session.status = session.activeSkills.length
+            ? "Updated active skills."
+            : "No active skills.";
+          deps.sessionMgr.touchSession(session);
+          deps.postState();
+          return;
+        }
+
+        case "clearActiveSkills": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session || session.busy) return;
+          clearSessionSkills(session);
+          session.status = "Cleared active skills.";
+          deps.sessionMgr.touchSession(session);
+          deps.postState();
+          return;
+        }
+
+        case "cancelBackgroundTask": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session) return;
+          const result = cancelBackgroundTask(message.taskId);
+          session.transcript.push({
+            role: "tool",
+            content: result,
+          });
+          session.status = result;
+          deps.sessionMgr.touchSession(session);
+          await deps.sessionMgr.saveState();
+          deps.postState();
+          return;
+        }
+
+        case "rerunBackgroundTask": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session) return;
+          const result = rerunBackgroundTask(
+            message.taskId,
+            deps.outputChannel,
+          );
+          session.transcript.push({
+            role: "tool",
+            content: result,
+          });
+          session.status = result;
+          deps.sessionMgr.touchSession(session);
+          await deps.sessionMgr.saveState();
+          deps.postState();
+          return;
+        }
+
+        case "clearBackgroundTasks": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session) return;
+          const staleTaskIds = session.harnessState.backgroundTasks
+            .filter((task) => task.status !== "running")
+            .map((task) => task.id);
+          if (!staleTaskIds.length) {
+            session.status = "No finished background commands to clear.";
+            deps.postState();
+            return;
+          }
+          removeBackgroundTasks(staleTaskIds);
+          session.harnessState.backgroundTasks = session.harnessState.backgroundTasks.filter(
+            (task) => task.status === "running",
+          );
+          const result = `Cleared ${staleTaskIds.length} finished background command${staleTaskIds.length === 1 ? "" : "s"}.`;
+          session.transcript.push({
+            role: "tool",
+            content: result,
+          });
+          session.status = result;
+          deps.sessionMgr.touchSession(session);
+          await deps.sessionMgr.saveState();
+          deps.postState();
           return;
         }
       }

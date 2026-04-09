@@ -46,6 +46,9 @@ export async function buildWorkspaceContext(
   if (session) {
     for (const entry of session.transcript) {
       transcriptTokens += estimateTokens(entry.content);
+      for (const file of entry.files ?? []) {
+        transcriptTokens += estimateTokens(file.content);
+      }
     }
   }
   // Remaining budget for workspace context (minimum 500 tokens)
@@ -314,6 +317,9 @@ export function estimateSessionTokens(
   charCount += TOOL_USE_INSTRUCTIONS.length;
   for (const entry of session.transcript) {
     charCount += entry.content.length;
+    for (const file of entry.files ?? []) {
+      charCount += file.content.length;
+    }
   }
   if (config.get<boolean>("includeWorkspaceContext", true)) {
     const charLimit =

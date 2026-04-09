@@ -1,7 +1,21 @@
+import type { EndpointProviderKind } from "./provider-capabilities";
+
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 export type InteractionMode = "ask" | "auto" | "plan";
 
 export type ToolCallType =
+  | "list_tools"
+  | "list_skills"
+  | "run_skill"
+  | "diagnostics"
+  | "open_file"
+  | "open_definition"
+  | "workspace_symbols"
+  | "hover_symbol"
+  | "code_actions"
+  | "go_to_definition"
+  | "find_references"
+  | "document_symbols"
   | "read_file"
   | "edit_file"
   | "write_file"
@@ -26,6 +40,13 @@ export type ToolCall = {
   // read_file
   offset?: number;
   limit?: number;
+  // IDE tools
+  line?: number;
+  character?: number;
+  includeDeclaration?: boolean;
+  // skills
+  skillName?: string;
+  skillPrompt?: string;
   // edit_file
   query?: string;
   search?: string;
@@ -69,6 +90,63 @@ export type ToolCall = {
   result?: string;
 };
 
+export type HarnessPendingApproval = {
+  toolCallId: string;
+  toolType: string;
+  filePath: string;
+};
+
+export type HarnessPendingDiff = {
+  toolCallId: string;
+  filePath: string;
+};
+
+export type HarnessTodoItem = {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+};
+
+export type HarnessBackgroundTaskStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type HarnessBackgroundTask = {
+  id: string;
+  command: string;
+  status: HarnessBackgroundTaskStatus;
+  outputPreview: string;
+  exitCode?: number;
+  updatedAt: number;
+  cwd?: string;
+};
+
+export type HarnessSessionState = {
+  pendingApprovals: HarnessPendingApproval[];
+  pendingDiffs: HarnessPendingDiff[];
+  todoItems: HarnessTodoItem[];
+  backgroundTasks: HarnessBackgroundTask[];
+};
+
+export type HarnessRuntimeHealth = {
+  level: "ok" | "warning" | "error";
+  summary: string;
+  issues: string[];
+  suggestions: string[];
+  actions: Array<"compact" | "refresh-models" | "show-jobs">;
+};
+
+export type SessionActiveSkill = {
+  id: string;
+  name: string;
+  description: string;
+  source: "builtin" | "workspace";
+  prompt: string;
+  note?: string;
+};
+
 export type EndpointConfig = {
   name: string;
   url: string;
@@ -94,11 +172,20 @@ export type ImageAttachment = {
   name?: string;
 };
 
+export type FileAttachment = {
+  name: string;
+  mimeType: string;
+  content: string;
+  sizeBytes: number;
+  truncated?: boolean;
+};
+
 export type ChatEntry = {
   role: ChatRole;
   content: string;
   toolCalls?: ToolCall[];
   images?: ImageAttachment[];
+  files?: FileAttachment[];
 };
 
 export type ChatSession = {
@@ -116,7 +203,10 @@ export type ChatSession = {
   checkpoints: Checkpoint[];
   lastTokenUsage?: { promptTokens: number; completionTokens: number };
   cumulativeTokens: { prompt: number; completion: number };
+  activeSkills: SessionActiveSkill[];
   activeSkillInjection?: string;
+  skillPreflightContext?: string;
+  harnessState: HarnessSessionState;
 };
 
 export type ResourceWarning = {
@@ -141,7 +231,12 @@ export type Checkpoint = {
 
 export type HookEvent = "postEdit" | "postCreate" | "preToolUse" | "postToolUse" | "onSessionStart" | "onSessionEnd";
 
-export type PersistedChatSession = Omit<ChatSession, "busy" | "currentRequest" | "checkpoints">;
+export type PersistedChatSession = Omit<
+  ChatSession,
+  "busy" | "currentRequest" | "checkpoints" | "activeSkills" | "activeSkillInjection" | "skillPreflightContext" | "harnessState"
+> & {
+  backgroundTasks?: HarnessBackgroundTask[];
+};
 
 export type SessionSummary = {
   id: string;
@@ -180,7 +275,12 @@ export type ChatCompletionResponse = {
 
 export type WebviewToExtensionMessage =
   | { type: "ready" }
-  | { type: "sendPrompt"; prompt: string; images?: ImageAttachment[] }
+  | {
+      type: "sendPrompt";
+      prompt: string;
+      images?: ImageAttachment[];
+      files?: FileAttachment[];
+    }
   | { type: "selectModel"; modelId: string }
   | { type: "selectReasoningEffort"; reasoningEffort: string }
   | { type: "selectEndpoint"; endpointUrl: string }
@@ -205,6 +305,11 @@ export type WebviewToExtensionMessage =
   | { type: "rejectAllToolCalls" }
   | { type: "openFile"; filePath: string }
   | { type: "openExternal"; url: string }
+  | { type: "removeActiveSkill"; skillId: string }
+  | { type: "clearActiveSkills" }
+  | { type: "cancelBackgroundTask"; taskId: string }
+  | { type: "rerunBackgroundTask"; taskId: string }
+  | { type: "clearBackgroundTasks" }
   | { type: "previewAllChanges" };
 
 export type ExtensionToWebviewMessage = {
@@ -212,6 +317,7 @@ export type ExtensionToWebviewMessage = {
   transcript: ChatEntry[];
   models: string[];
   selectedModel: string;
+  providerKind: EndpointProviderKind;
   selectedReasoningEffort: string;
   showReasoningControl: boolean;
   reasoningOptions: string[];
@@ -227,6 +333,9 @@ export type ExtensionToWebviewMessage = {
   contextTokenEstimate: number;
   contextWindowSize: number;
   cumulativeTokens: { prompt: number; completion: number };
+  activeSkills: Array<Omit<SessionActiveSkill, "prompt">>;
+  harnessState: HarnessSessionState;
+  runtimeHealth: HarnessRuntimeHealth;
 } | {
   type: "streamStart";
 } | {

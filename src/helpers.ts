@@ -60,6 +60,176 @@ export function parseToolCalls(text: string): ToolCall[] {
   const calls: ToolCall[] = [];
   let match;
 
+  // list_tools — optional query for filtering
+  const listToolsRegex = /@list_tools(?::\s*(.+?))?(?:\n|$)/g;
+  while ((match = listToolsRegex.exec(text)) !== null) {
+    calls.push({
+      id: generateToolCallId(),
+      type: "list_tools",
+      filePath: "",
+      query: match[1]?.trim() || "",
+      status: "pending",
+    });
+  }
+
+  // list_skills — optional query for filtering
+  const listSkillsRegex = /@list_skills(?::\s*(.+?))?(?:\n|$)/g;
+  while ((match = listSkillsRegex.exec(text)) !== null) {
+    calls.push({
+      id: generateToolCallId(),
+      type: "list_skills",
+      filePath: "",
+      query: match[1]?.trim() || "",
+      status: "pending",
+    });
+  }
+
+  // run_skill — activate a skill with an optional prompt
+  const runSkillRegex = /@run_skill:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = runSkillRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const promptMatch = rest.match(/--prompt\s+(.+)$/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "run_skill",
+      filePath: "",
+      skillName: match[1].trim(),
+      skillPrompt: promptMatch?.[1]?.trim() || "",
+      status: "pending",
+    });
+  }
+
+  // diagnostics — optional path
+  const diagnosticsRegex = /@diagnostics(?::\s*(.+?))?(?:\n|$)/g;
+  while ((match = diagnosticsRegex.exec(text)) !== null) {
+    calls.push({
+      id: generateToolCallId(),
+      type: "diagnostics",
+      filePath: match[1]?.trim() || "",
+      status: "pending",
+    });
+  }
+
+  // open_file
+  const openFileRegex = /@open_file:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = openFileRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "open_file",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      status: "pending",
+    });
+  }
+
+  // open_definition
+  const openDefinitionRegex = /@open_definition:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = openDefinitionRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "open_definition",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      status: "pending",
+    });
+  }
+
+  // workspace_symbols
+  const workspaceSymbolsRegex = /@workspace_symbols:\s*(.+?)(?:\n|$)/g;
+  while ((match = workspaceSymbolsRegex.exec(text)) !== null) {
+    calls.push({
+      id: generateToolCallId(),
+      type: "workspace_symbols",
+      filePath: "",
+      query: match[1].trim(),
+      status: "pending",
+    });
+  }
+
+  // hover_symbol
+  const hoverSymbolRegex = /@hover_symbol:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = hoverSymbolRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "hover_symbol",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      status: "pending",
+    });
+  }
+
+  // code_actions
+  const codeActionsRegex = /@code_actions:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = codeActionsRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "code_actions",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      status: "pending",
+    });
+  }
+
+  // go_to_definition
+  const definitionRegex = /@go_to_definition:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = definitionRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "go_to_definition",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      status: "pending",
+    });
+  }
+
+  // find_references
+  const referencesRegex = /@find_references:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = referencesRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "find_references",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      includeDeclaration: !/--exclude-declaration/.test(rest),
+      status: "pending",
+    });
+  }
+
+  // document_symbols
+  const symbolsRegex = /@document_symbols:\s*(\S+)(?:\n|$)/g;
+  while ((match = symbolsRegex.exec(text)) !== null) {
+    calls.push({
+      id: generateToolCallId(),
+      type: "document_symbols",
+      filePath: match[1].trim(),
+      status: "pending",
+    });
+  }
+
   // read_file — supports optional --offset and --limit
   const readRegex = /@read_file:\s*(\S+)(.*?)(?:\n|$)/g;
   while ((match = readRegex.exec(text)) !== null) {

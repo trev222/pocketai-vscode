@@ -8,6 +8,11 @@ import type {
   ChatSession,
 } from "./types";
 import { normalizeBaseUrl } from "./helpers";
+import {
+  getEndpointCapabilities,
+  LOCAL_POCKETAI_URL,
+  type EndpointCapabilities,
+} from "./provider-capabilities";
 
 /**
  * ID prefixes for non-chat models (image gen, video gen, voice/TTS/STT).
@@ -21,6 +26,8 @@ const NON_CHAT_MODEL_PREFIXES = [
   // Voice / STT / TTS / VAD
   "whisper-", "silero-", "kokoro-", "piper-",
 ];
+
+const ACTIVE_ENDPOINT_STORAGE_KEY = "pocketai.activeEndpointUrl";
 
 /**
  * Extract a numeric parameter size from a model ID (e.g. "qwen3.5-9b" → 9).
@@ -62,7 +69,7 @@ export class EndpointManager {
     return (
       this.activeEndpointUrl ||
       normalizeBaseUrl(
-        this.config.get<string>("baseUrl") ?? "http://127.0.0.1:39457",
+        this.config.get<string>("baseUrl") ?? LOCAL_POCKETAI_URL,
       )
     );
   }
@@ -71,7 +78,7 @@ export class EndpointManager {
     const endpoints = this.config.get<EndpointConfig[]>("endpoints") ?? [];
     if (endpoints.length) return endpoints;
     const legacy = (
-      this.config.get<string>("baseUrl") ?? "http://127.0.0.1:39457"
+      this.config.get<string>("baseUrl") ?? LOCAL_POCKETAI_URL
     ).trim();
     return [{ name: "Local PocketAI", url: legacy }];
   }
@@ -83,12 +90,25 @@ export class EndpointManager {
     );
     return (
       match ??
-      endpoints[0] ?? { name: "Local PocketAI", url: "http://127.0.0.1:39457" }
+      endpoints[0] ?? { name: "Local PocketAI", url: LOCAL_POCKETAI_URL }
     );
+  }
+
+  getEndpointCapabilities(endpointUrl: string): EndpointCapabilities {
+    return getEndpointCapabilities(endpointUrl, {
+      structuredToolsEnabled: this.config.get<boolean>("useStructuredTools", true),
+    });
+  }
+
+  getActiveEndpointCapabilities(): EndpointCapabilities {
+    return this.getEndpointCapabilities(this.baseUrl);
   }
 
   initEndpoints() {
     const endpoints = this.getEndpoints();
+    const storedActiveEndpointUrl = normalizeBaseUrl(
+      this.context.workspaceState.get<string>(ACTIVE_ENDPOINT_STORAGE_KEY) ?? "",
+    );
     for (const ep of endpoints) {
       const url = normalizeBaseUrl(ep.url);
       if (!this.endpointHealthMap.has(url)) {
@@ -104,9 +124,15 @@ export class EndpointManager {
       !this.activeEndpointUrl ||
       !this.endpointHealthMap.has(this.activeEndpointUrl)
     ) {
-      this.activeEndpointUrl = normalizeBaseUrl(
-        endpoints[0]?.url ?? "http://127.0.0.1:39457",
+      const fallbackUrl = normalizeBaseUrl(
+        endpoints[0]?.url ?? LOCAL_POCKETAI_URL,
       );
+      this.activeEndpointUrl =
+        storedActiveEndpointUrl &&
+        this.endpointHealthMap.has(storedActiveEndpointUrl)
+          ? storedActiveEndpointUrl
+          : fallbackUrl;
+      void this.persistActiveEndpointUrl();
     }
   }
 
@@ -282,7 +308,15 @@ export class EndpointManager {
     const url = normalizeBaseUrl(endpointUrl);
     if (!this.endpointHealthMap.has(url)) return;
     this.activeEndpointUrl = url;
+    void this.persistActiveEndpointUrl();
     this.updateStatusBar();
+  }
+
+  private persistActiveEndpointUrl() {
+    return this.context.workspaceState.update(
+      ACTIVE_ENDPOINT_STORAGE_KEY,
+      this.activeEndpointUrl || undefined,
+    );
   }
 
   initStatusBar(sidebarSessionId: string, sessions: Map<string, ChatSession>) {

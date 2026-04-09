@@ -15,6 +15,309 @@ export type OpenAITool = {
 
 export const TOOL_DEFINITIONS: OpenAITool[] = [
   /* ------------------------------------------------------------------ */
+  /*  Tool Discovery                                                     */
+  /* ------------------------------------------------------------------ */
+  {
+    type: "function",
+    function: {
+      name: "list_tools",
+      description:
+        "Lists the tools currently available to you, including their safety/risk level and what they are for. " +
+        "Use this when you are unsure which tool to use or want to discover capabilities before acting. " +
+        "Optionally pass a query to filter tools by name or description.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Optional search text to filter the available tools by name or description.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_skills",
+      description:
+        "Lists reusable built-in and workspace-local skills you can activate for the current request. " +
+        "Use this when you want to discover higher-level workflows like debugging, review, testing, or refactoring before acting. " +
+        "Optionally pass a query to filter skills by name or description.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Optional search text to filter available skills by name or description.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_skill",
+      description:
+        "Activates a reusable skill for the rest of the current request. " +
+        "Use this when a known workflow should guide how you approach the task, such as debugging, reviewing, or writing tests. " +
+        "After activating the skill, continue solving the user's task with the skill instructions in mind.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description:
+              "The skill id to activate. Use list_skills first if you do not know what skills are available.",
+          },
+          prompt: {
+            type: "string",
+            description:
+              "Optional note describing how to apply the skill to the current task.",
+          },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "diagnostics",
+      description:
+        "Reads current VS Code diagnostics (errors and warnings) for the workspace or a single file. " +
+        "Use this to inspect compile errors, type errors, lint failures, and warnings before editing. " +
+        "Prefer this over guessing from the user's error summary when diagnostics are likely available.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Optional relative file path to scope diagnostics to one file. Omit to inspect workspace-wide diagnostics.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "go_to_definition",
+      description:
+        "Resolves the definition of the symbol at a specific file position using VS Code's language intelligence. " +
+        "Use this after reading a file when you need to jump to an imported function, type, variable, or method definition.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file that contains the symbol usage.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number of the symbol usage.",
+          },
+          character: {
+            type: "number",
+            description:
+              "0-based character offset on the line. If unsure, use the start of the symbol.",
+          },
+        },
+        required: ["path", "line", "character"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_file",
+      description:
+        "Opens a workspace file in the VS Code editor and optionally reveals a specific line or position. " +
+        "Use this when you want to surface the exact file for the user, verify the active editor location, or move attention to a concrete implementation site after analysis.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the file to open in the editor.",
+          },
+          line: {
+            type: "number",
+            description:
+              "Optional 1-based line number to reveal. If omitted, opens the file at its current/default position.",
+          },
+          character: {
+            type: "number",
+            description:
+              "Optional 0-based character offset on the target line. Defaults to 0 when line is provided.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_definition",
+      description:
+        "Finds the definition for the symbol at a specific file position and opens that definition directly in the VS Code editor. " +
+        "Use this when you want to navigate from a usage site to the real implementation instead of only listing candidate definition locations.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file that contains the symbol usage.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number of the symbol usage.",
+          },
+          character: {
+            type: "number",
+            description:
+              "0-based character offset on the line. If unsure, use the start of the symbol.",
+          },
+        },
+        required: ["path", "line", "character"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_symbols",
+      description:
+        "Searches for matching symbols across the workspace using VS Code's language intelligence. " +
+        "Use this when you know a class, function, method, type, or constant name but not the file where it is defined.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Search text for the symbol name. Partial names are allowed.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "hover_symbol",
+      description:
+        "Reads hover/type/documentation information for the symbol at a specific file position using VS Code's language intelligence. " +
+        "Use this to inspect inferred types, signatures, docs, or quick info before editing or explaining code.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file that contains the symbol usage.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number of the symbol usage.",
+          },
+          character: {
+            type: "number",
+            description:
+              "0-based character offset on the line. If unsure, use the start of the symbol.",
+          },
+        },
+        required: ["path", "line", "character"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code_actions",
+      description:
+        "Lists available VS Code code actions at a specific file position, such as quick fixes, refactors, or source actions. " +
+        "Use this to see what the language server/editor suggests before making manual edits.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file to inspect.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number to inspect for code actions.",
+          },
+          character: {
+            type: "number",
+            description:
+              "0-based character offset on the line. If unsure, use the start of the symbol or error.",
+          },
+        },
+        required: ["path", "line", "character"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_references",
+      description:
+        "Finds references to the symbol at a specific file position using VS Code's language intelligence. " +
+        "Use this to understand call sites, usages, and impact before refactoring.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file that contains the symbol usage.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number of the symbol usage.",
+          },
+          character: {
+            type: "number",
+            description:
+              "0-based character offset on the line. If unsure, use the start of the symbol.",
+          },
+          include_declaration: {
+            type: "boolean",
+            description:
+              "Whether to include the declaration/reference site itself. Defaults to true.",
+          },
+        },
+        required: ["path", "line", "character"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "document_symbols",
+      description:
+        "Lists the symbols in a file using VS Code's language intelligence. " +
+        "Use this to quickly inspect functions, classes, methods, constants, and nested members before reading or editing.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file to inspect.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+
+  /* ------------------------------------------------------------------ */
   /*  Read                                                               */
   /* ------------------------------------------------------------------ */
   {
@@ -248,6 +551,7 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
         "Requires user approval unless in auto mode. " +
         "Timeout: up to 600000ms (10 minutes), default 120000ms (2 minutes). " +
         "Use background mode for long-running processes (dev servers, watchers). " +
+        "After starting a background command, you can check it with 'bg_status <taskId>' or stop it with 'bg_cancel <taskId>'. " +
         "Provide a description so the user understands what the command does before approving.",
       parameters: {
         type: "object",

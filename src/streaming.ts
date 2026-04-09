@@ -6,7 +6,9 @@ import type {
   ToolCallType,
   ChatCompletionResponse,
   ExtensionToWebviewMessage,
+  FileAttachment,
 } from "./types";
+import type { EndpointCapabilities } from "./provider-capabilities";
 import {
   TOOL_USE_INSTRUCTIONS,
   PLAN_MODE_INSTRUCTIONS,
@@ -14,7 +16,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
 } from "./constants";
 import { generateToolCallId } from "./helpers";
-import { TOOL_DEFINITIONS } from "./tool-definitions";
+import type { OpenAITool } from "./tool-definitions";
 
 /**
  * Wrapper around fetch that produces actionable error messages for network failures.
@@ -63,6 +65,7 @@ export interface StreamingDeps {
   getActiveSystemPrompt: () => string;
   getActiveReasoningEffort: () => string;
   getActiveMaxTokens: () => number;
+  getActiveEndpointCapabilities: () => EndpointCapabilities;
   broadcastToWebviews: (message: ExtensionToWebviewMessage) => void;
   memoryContext?: string;
 }
@@ -70,8 +73,16 @@ export interface StreamingDeps {
 const STRUCTURED_TOOL_INSTRUCTIONS = `You have tools available via function calling. Follow these rules:
 
 # Tool Selection
+- If the user asks what skills are available, call list_skills instead of answering from memory.
+- If the user asks to use a named skill, call list_skills to verify it and run_skill to activate it.
+- Do not claim a skill is available unless it appears in list_skills.
 - To find files by name or extension, use glob. To search file contents, use grep.
 - To read a file, use read_file — never run_command with cat/head/tail.
+- To bring a file or code location into the editor for the user, use open_file.
+- To jump directly from a usage site to its implementation in the editor, use open_definition.
+- To search for a symbol across the workspace, use workspace_symbols.
+- To inspect type/docs/signature info for a symbol at a position, use hover_symbol.
+- To inspect available quick fixes or refactors at a location, use code_actions.
 - To modify a file, use edit_file — never run_command with sed/awk.
 - To create a new file, use write_file — never run_command with echo/cat redirection.
 - Use run_command only for shell operations that have no dedicated tool (builds, installs, test runners, etc.).
@@ -109,9 +120,11 @@ function buildCompletionRequestBody(
   deps: StreamingDeps,
   extras?: Record<string, unknown>,
 ) {
-  const reasoningEffort =
-    session.selectedReasoningEffort.trim() ||
-    deps.getActiveReasoningEffort().trim();
+  const reasoningEffort = deps.getActiveEndpointCapabilities()
+    .supportsReasoningEffort
+    ? session.selectedReasoningEffort.trim() ||
+      deps.getActiveReasoningEffort().trim()
+    : "";
 
   return {
     model: session.selectedModel,
@@ -122,6 +135,48 @@ function buildCompletionRequestBody(
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(extras ?? {}),
   };
+}
+
+function buildAttachedFilesContext(files?: FileAttachment[]): string {
+  if (!files?.length) return "";
+
+  return files
+    .map((file) => {
+      const metadata = [file.name];
+      if (file.mimeType) metadata.push(file.mimeType);
+      if (typeof file.sizeBytes === "number" && file.sizeBytes > 0) {
+        metadata.push(`${Math.max(1, Math.round(file.sizeBytes / 1024))} KB`);
+      }
+      if (file.truncated) metadata.push("truncated");
+
+      const content = file.content.trim()
+        ? file.content
+        : "[Attachment content unavailable in this restored session.]";
+
+      return [
+        `[Attached file: ${metadata.join(" | ")}]`,
+        "--- BEGIN FILE ---",
+        content,
+        "--- END FILE ---",
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function buildEntryTextForModel(
+  entry: ChatSession["transcript"][number],
+): string {
+  const parts: string[] = [];
+  if (entry.content.trim()) {
+    parts.push(entry.content);
+  }
+
+  const fileContext = buildAttachedFilesContext(entry.files);
+  if (fileContext) {
+    parts.push(fileContext);
+  }
+
+  return parts.join("\n\n");
 }
 
 export function buildMessages(
@@ -153,9 +208,8 @@ export function buildMessages(
         ? "When you use tool calls, the user will review and approve each change before it is applied."
         : "",
     workspaceContext,
-    session.activeSkillInjection
-      ? `[Active Skill]\n${session.activeSkillInjection}`
-      : "",
+    session.activeSkillInjection || "",
+    session.skillPreflightContext || "",
   ].filter(Boolean);
   messages.push({ role: "system", content: parts.join("\n\n") });
 
@@ -163,11 +217,12 @@ export function buildMessages(
     if (entry.role === "system") continue;
     const role =
       entry.role === "tool" ? "user" : (entry.role as "user" | "assistant");
+    const entryText = buildEntryTextForModel(entry);
 
     // Build multimodal content when images are attached
     if (entry.images?.length) {
       const contentParts: Array<Record<string, unknown>> = [
-        { type: "text", text: entry.content },
+        { type: "text", text: entryText || entry.content },
       ];
       for (const img of entry.images) {
         contentParts.push({
@@ -177,7 +232,7 @@ export function buildMessages(
       }
       messages.push({ role, content: contentParts });
     } else {
-      messages.push({ role, content: entry.content });
+      messages.push({ role, content: entryText || entry.content });
     }
   }
   return messages;
@@ -347,14 +402,11 @@ export async function streamResponseWithTools(
   messages: ChatMessage[],
   maxTokens: number,
   deps: StreamingDeps,
-  extraTools?: import("./tool-definitions").OpenAITool[],
+  tools?: OpenAITool[],
 ): Promise<StreamResult> {
   deps.broadcastToWebviews({ type: "streamStart" });
 
-  const baseTools = session.mode === "plan" ? undefined : TOOL_DEFINITIONS;
-  const tools = baseTools && extraTools?.length
-    ? [...baseTools, ...extraTools]
-    : baseTools;
+  const structuredTools = session.mode === "plan" ? undefined : tools;
 
   const response = await fetchWithContext(`${deps.baseUrl}/v1/chat/completions`, {
     method: "POST",
@@ -362,12 +414,12 @@ export async function streamResponseWithTools(
       "Content-Type": "application/json",
       Authorization: `Bearer ${deps.apiKey}`,
     },
-    body: JSON.stringify(
-      buildCompletionRequestBody(session, messages, maxTokens, deps, {
-        stream: true,
-        ...(tools ? { tools } : {}),
-      }),
-    ),
+      body: JSON.stringify(
+        buildCompletionRequestBody(session, messages, maxTokens, deps, {
+          stream: true,
+          ...(structuredTools ? { tools: structuredTools } : {}),
+        }),
+      ),
     signal: session.currentRequest?.signal,
   });
 
@@ -594,6 +646,51 @@ function createToolCallFromFunction(
   }
 
   switch (type) {
+    case "list_tools":
+      tc.query = args.query;
+      break;
+    case "list_skills":
+      tc.query = args.query;
+      break;
+    case "run_skill":
+      tc.skillName = args.name;
+      tc.skillPrompt = args.prompt;
+      break;
+    case "diagnostics":
+      if (args.path) tc.filePath = args.path;
+      break;
+    case "open_file":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      break;
+    case "open_definition":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      break;
+    case "workspace_symbols":
+      tc.query = args.query;
+      break;
+    case "hover_symbol":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      break;
+    case "code_actions":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      break;
+    case "go_to_definition":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      break;
+    case "find_references":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      if (args.include_declaration !== undefined) {
+        tc.includeDeclaration = Boolean(args.include_declaration);
+      }
+      break;
+    case "document_symbols":
+      break;
     case "read_file":
       if (args.offset !== undefined) tc.offset = Number(args.offset);
       if (args.limit !== undefined) tc.limit = Number(args.limit);

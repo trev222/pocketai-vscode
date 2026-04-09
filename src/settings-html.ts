@@ -563,25 +563,22 @@ export function getSettingsHtml(): string {
     signInCodexBtn.disabled = !!codex.busy || !codex.available;
     refreshCodexBtn.disabled = !!codex.busy;
 
-    const defaultModel = models.find(model => model.isDefault) || models[0];
-    const effectiveModelId = defaultModel ? defaultModel.id : "";
-    const reasoningModel = models.find(model => model.id === effectiveModelId) || defaultModel;
-    const reasoningOptions = reasoningModel?.supportedReasoningEfforts || [];
+    const reasoningOptions = Array.isArray(codex.reasoningOptions) ? codex.reasoningOptions : [];
     let reasoningHtml = '<option value="">Auto</option>';
     for (const option of reasoningOptions) {
-      const selected = option.reasoningEffort === codex.selectedReasoningEffort ? " selected" : "";
-      reasoningHtml += '<option value="' + escapeHtml(option.reasoningEffort) + '"' + selected + '>' + escapeHtml(option.reasoningEffort) + '</option>';
+      const selected = option === codex.selectedReasoningEffort ? " selected" : "";
+      reasoningHtml += '<option value="' + escapeHtml(option) + '"' + selected + '>' + escapeHtml(option) + '</option>';
     }
     codexReasoningSelect.innerHTML = reasoningHtml;
     codexReasoningSelect.disabled =
-      !!codex.busy || !codex.available || !reasoningModel || reasoningOptions.length === 0;
+      !!codex.busy || !codex.available || reasoningOptions.length === 0;
   }
 
   function renderEndpoints(state) {
     endpointsList.innerHTML = "";
     for (const ep of state.endpoints) {
       const isActive = ep.url === state.activeEndpoint;
-      const isProtectedEndpoint = ep.name === "Local PocketAI";
+      const isProtectedEndpoint = ep.providerKind === "local-pocketai";
       const card = document.createElement("div");
       card.className = "endpoint-card" + (isActive ? " active" : "");
 

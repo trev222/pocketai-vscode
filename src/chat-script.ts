@@ -7,8 +7,24 @@ export function getChatScript(brandIconUri: string): string {
     const messagesEl = document.getElementById("messages");
     const promptEl = document.getElementById("prompt");
     const sendBtn = document.getElementById("sendBtn");
+    const attachmentBtn = document.getElementById("attachmentBtn");
+    const attachmentInput = document.getElementById("attachmentInput");
+    const attachMenuWrap = document.getElementById("attachMenuWrap");
+    const attachMenu = document.getElementById("attachMenu");
+    const attachUploadAction = document.getElementById("attachUploadAction");
     const statusText = document.getElementById("statusText");
-    const modeSelector = document.getElementById("modeSelector");
+    const modeTrigger = document.getElementById("modeTrigger");
+    const modeTriggerLabel = document.getElementById("modeTriggerLabel");
+    const modeMenuWrap = document.getElementById("modeMenuWrap");
+    const modeMenu = document.getElementById("modeMenu");
+    const modelTrigger = document.getElementById("modelTrigger");
+    const modelTriggerLabel = document.getElementById("modelTriggerLabel");
+    const modelMenuWrap = document.getElementById("modelMenuWrap");
+    const modelMenu = document.getElementById("modelMenu");
+    const reasoningTrigger = document.getElementById("reasoningTrigger");
+    const reasoningTriggerLabel = document.getElementById("reasoningTriggerLabel");
+    const reasoningMenuWrap = document.getElementById("reasoningMenuWrap");
+    const reasoningMenu = document.getElementById("reasoningMenu");
     const sessionTrigger = document.getElementById("sessionTrigger");
     const sessionMenu = document.getElementById("sessionMenu");
     const sessionList = document.getElementById("sessionList");
@@ -21,12 +37,14 @@ export function getChatScript(brandIconUri: string): string {
     const endpointSelect = document.getElementById("endpointSelect");
     const modelSelect = document.getElementById("modelSelect");
     const reasoningSelect = document.getElementById("reasoningSelect");
+    const activeSkillsEl = document.getElementById("activeSkills");
     const exportBtn = document.getElementById("exportBtn");
     const sessionSearch = document.getElementById("sessionSearch");
     const sessionSearchWrap = document.getElementById("sessionSearchWrap");
     const tokenUsageEl = document.getElementById("tokenUsage");
     const tokenText = document.getElementById("tokenText");
     const tokenBarFill = document.getElementById("tokenBarFill");
+    const harnessPane = document.getElementById("harnessPane");
 
     let state = null;
     let isStreaming = false;
@@ -37,10 +55,80 @@ export function getChatScript(brandIconUri: string): string {
     const messageStats = new Map();
     let editingSessionId = "";
     let isEditingSessionTitle = false;
+    let composerNoticeTimeout = null;
+
+    const TEXT_ATTACHMENT_EXTENSION_RE = /\.(txt|md|mdx|markdown|json|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|less|js|jsx|mjs|cjs|ts|tsx|py|rb|php|java|kt|go|rs|c|cc|cpp|cxx|h|hpp|cs|swift|sh|bash|zsh|fish|sql|graphql|gql|csv|tsv|log|env)$/i;
+    const TEXT_ATTACHMENT_NAME_RE = /^(dockerfile|makefile|readme|license|procfile|gemfile|rakefile|brewfile|\.env.*)$/i;
+    const MAX_TEXT_ATTACHMENT_BYTES = 1024 * 1024;
+    const MAX_TEXT_ATTACHMENT_CHARS = 40000;
+    const MODE_LABELS = {
+      ask: "Ask",
+      auto: "Auto",
+      plan: "Plan",
+    };
+
+    function formatReasoningLabel(reasoningEffort) {
+      if (!reasoningEffort) return "Auto";
+      return reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1);
+    }
 
     /* ── Markdown renderer ── */
     function escapeHtml(s) {
       return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    function formatFileSize(bytes) {
+      if (!bytes || bytes < 1024) return (bytes || 0) + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+      return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    }
+
+    function buildFileMetaLabel(file) {
+      const parts = [];
+      if (file.mimeType) parts.push(file.mimeType);
+      if (typeof file.sizeBytes === "number") parts.push(formatFileSize(file.sizeBytes));
+      if (file.truncated) parts.push("truncated");
+      return parts.join(" · ");
+    }
+
+    function buildPendingImageMetaLabel(img) {
+      if (img && img.mimeType) {
+        return img.mimeType.replace(/^image\\//, "").toUpperCase();
+      }
+      return "Image";
+    }
+
+    function setComposerNotice(message) {
+      if (!statusText || !message) return;
+      statusText.textContent = message;
+      if (composerNoticeTimeout) clearTimeout(composerNoticeTimeout);
+      composerNoticeTimeout = setTimeout(() => {
+        statusText.textContent = (state && state.status) || "";
+        composerNoticeTimeout = null;
+      }, 4000);
+    }
+
+    function closeModeMenu() {
+      if (modeMenu) modeMenu.classList.remove("open");
+    }
+
+    function closeModelMenu() {
+      if (modelMenu) modelMenu.classList.remove("open");
+    }
+
+    function closeReasoningMenu() {
+      if (reasoningMenu) reasoningMenu.classList.remove("open");
+    }
+
+    function closeAttachMenu() {
+      if (attachMenu) attachMenu.classList.remove("open");
+    }
+
+    function closeComposerMenus() {
+      closeModeMenu();
+      closeModelMenu();
+      closeReasoningMenu();
+      closeAttachMenu();
     }
 
     /* ── Lightweight syntax highlighter ── */
@@ -221,15 +309,20 @@ export function getChatScript(brandIconUri: string): string {
       // Blockquotes
       html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
       html = html.replace(/<\\/blockquote>\\n<blockquote>/g, "\\n");
-      html = html.replace(/^[\\-\\*] (.+)$/gm, "<li>$1</li>");
-      html = html.replace(/^\\d+\\. (.+)$/gm, "<li>$1</li>");
-      html = html.replace(/((?:<li>.*<\\/li>\\n?)+)/g, "<ul>$1</ul>");
+      html = html.replace(/^\\s*[\\-\\*] (.+)$/gm, "<li>$1</li>");
+      html = html.replace(/^\\s*\\d+\\. (.+)$/gm, "<li>$1</li>");
+      html = html.replace(/<\\/li>\\s*\\n(?:\\s*\\n)*\\s*<li>/g, "</li>\\n<li>");
+      html = html.replace(/((?:<li>.*<\\/li>\\s*)+)/g, "<ul>$1</ul>");
       html = html.replace(/\\n\\n/g, "</p><p>");
       html = html.replace(/\\n/g, "<br>");
       html = "<p>" + html + "</p>";
       html = html.replace(/<p><\\/p>/g, "");
       html = html.replace(/<p>(<h[123]>)/g, "$1");
       html = html.replace(/(<\\/h[123]>)<\\/p>/g, "$1");
+      html = html.replace(/<ul>(?:\\s|<br>)+/g, "<ul>");
+      html = html.replace(/(?:\\s|<br>)+<\\/ul>/g, "</ul>");
+      html = html.replace(/<\\/li>(?:\\s|<br>)+<li>/g, "</li><li>");
+      html = html.replace(/<\\/ul>(?:\\s|<br>|<\\/p><p>)+<ul>/g, "");
       html = html.replace(/<p>(<ul>)/g, "$1");
       html = html.replace(/(<\\/ul>)<\\/p>/g, "$1");
       html = html.replace(/<p>(<blockquote>)/g, "$1");
@@ -281,18 +374,87 @@ export function getChatScript(brandIconUri: string): string {
     });
 
     /* ── Render functions ── */
+    function getHarnessState(payload) {
+      const harnessState = payload && payload.harnessState;
+      return harnessState || {
+        pendingApprovals: [],
+        pendingDiffs: [],
+        todoItems: [],
+        backgroundTasks: [],
+      };
+    }
+
+    function getRuntimeHealth(payload) {
+      const runtimeHealth = payload && payload.runtimeHealth;
+      return runtimeHealth || {
+        level: "ok",
+        summary: "",
+        issues: [],
+        suggestions: [],
+        actions: [],
+      };
+    }
+
+    function getPendingApprovalMap(payload) {
+      const map = new Map();
+      const approvals = getHarnessState(payload).pendingApprovals || [];
+      for (const approval of approvals) {
+        if (approval && approval.toolCallId) {
+          map.set(approval.toolCallId, approval);
+        }
+      }
+      return map;
+    }
+
+    function getPendingDiffSet(payload) {
+      const set = new Set();
+      const pendingDiffs = getHarnessState(payload).pendingDiffs || [];
+      for (const diff of pendingDiffs) {
+        if (diff && diff.toolCallId) {
+          set.add(diff.toolCallId);
+        }
+      }
+      return set;
+    }
+
+    function getEffectiveToolStatus(tc, pendingApprovalMap) {
+      return pendingApprovalMap.has(tc.id) ? "pending" : tc.status;
+    }
+
+    function getPendingToolCalls(toolCalls, pendingApprovalMap) {
+      return (toolCalls || []).filter((tc) => getEffectiveToolStatus(tc, pendingApprovalMap) === "pending");
+    }
+
     /** Build a fingerprint string for a transcript entry so we can detect changes. */
-    function msgFingerprint(entry, idx) {
+    function msgFingerprint(entry, idx, pendingApprovalMap, pendingDiffSet) {
       const tcPart = entry.toolCalls
-        ? entry.toolCalls.map(t => t.id + ":" + t.status + ":" + (t.result || "").length).join(",")
+        ? entry.toolCalls
+            .map((t) =>
+              t.id +
+              ":" +
+              getEffectiveToolStatus(t, pendingApprovalMap) +
+              ":" +
+              (pendingDiffSet.has(t.id) ? "1" : "0") +
+              ":" +
+              (t.result || "").length,
+            )
+            .join(",")
         : "";
-      return entry.role + ":" + idx + ":" + (entry.content || "").length + ":" + tcPart;
+      const filePart = entry.files
+        ? entry.files
+            .map((file) => file.name + ":" + file.content.length + ":" + (file.truncated ? "1" : "0"))
+            .join(",")
+        : "";
+      const imagePart = entry.images?.length || 0;
+      return entry.role + ":" + idx + ":" + (entry.content || "").length + ":" + imagePart + ":" + filePart + ":" + tcPart;
     }
 
     let prevFingerprints = [];
 
     function renderMessages(payload) {
       const items = payload.transcript || [];
+      const pendingApprovalMap = getPendingApprovalMap(payload);
+      const pendingDiffSet = getPendingDiffSet(payload);
 
       if (!items.length && !isStreaming) {
         messagesEl.innerHTML =
@@ -317,7 +479,9 @@ export function getChatScript(brandIconUri: string): string {
       const visibleItems = [];
       for (let i = 0; i < items.length; i++) {
         if (items[i].role === "system") continue;
-        newFingerprints.push(msgFingerprint(items[i], i));
+        newFingerprints.push(
+          msgFingerprint(items[i], i, pendingApprovalMap, pendingDiffSet),
+        );
         visibleItems.push({ entry: items[i], idx: i });
       }
 
@@ -347,7 +511,12 @@ export function getChatScript(brandIconUri: string): string {
 
       // Append new/changed messages from firstDiff onward
       for (let j = firstDiff; j < visibleItems.length; j++) {
-        appendMessage(visibleItems[j].entry, visibleItems[j].idx);
+        appendMessage(
+          visibleItems[j].entry,
+          visibleItems[j].idx,
+          pendingApprovalMap,
+          pendingDiffSet,
+        );
       }
 
       prevFingerprints = newFingerprints;
@@ -358,7 +527,7 @@ export function getChatScript(brandIconUri: string): string {
       }
     }
 
-    function appendMessage(entry, msgIndex) {
+    function appendMessage(entry, msgIndex, pendingApprovalMap, pendingDiffSet) {
       const div = document.createElement("div");
       const roleClass = entry.role === "user" ? "msg-user" : entry.role === "tool" ? "msg-tool" : "msg-assistant";
       div.className = "msg " + roleClass;
@@ -388,6 +557,27 @@ export function getChatScript(brandIconUri: string): string {
           body.appendChild(imgEl);
         }
       }
+      if (entry.files && entry.files.length) {
+        const fileList = document.createElement("div");
+        fileList.className = "msg-attachment-list";
+        for (const file of entry.files) {
+          const fileCard = document.createElement("div");
+          fileCard.className = "msg-file-attachment";
+
+          const nameEl = document.createElement("span");
+          nameEl.className = "name";
+          nameEl.textContent = file.name || "attached file";
+          fileCard.appendChild(nameEl);
+
+          const metaEl = document.createElement("span");
+          metaEl.className = "meta";
+          metaEl.textContent = buildFileMetaLabel(file) || "attached file";
+          fileCard.appendChild(metaEl);
+
+          fileList.appendChild(fileCard);
+        }
+        body.appendChild(fileList);
+      }
       div.appendChild(body);
 
       if (entry.role === "assistant" && messageStats.has(msgIndex)) {
@@ -404,7 +594,11 @@ export function getChatScript(brandIconUri: string): string {
       }
 
       if (entry.toolCalls && entry.toolCalls.length) {
-        const pendingCount = entry.toolCalls.filter(t => t.status === "pending").length;
+        const pendingToolCalls = getPendingToolCalls(
+          entry.toolCalls,
+          pendingApprovalMap,
+        );
+        const pendingCount = pendingToolCalls.length;
         if (pendingCount > 1) {
           const batchBar = document.createElement("div");
           batchBar.className = "batch-actions";
@@ -417,7 +611,11 @@ export function getChatScript(brandIconUri: string): string {
             if (previewContainer) {
               previewContainer.remove();
             } else {
-              const editCalls = entry.toolCalls.filter(t => t.status === "pending" && (t.type === "edit_file" || t.type === "write_file"));
+              const editCalls = pendingToolCalls.filter(
+                (t) =>
+                  pendingDiffSet.has(t.id) &&
+                  (t.type === "edit_file" || t.type === "write_file"),
+              );
               if (editCalls.length) {
                 const preview = document.createElement("div");
                 preview.className = "multi-file-preview";
@@ -487,7 +685,7 @@ export function getChatScript(brandIconUri: string): string {
           div.appendChild(batchBar);
         }
         for (const tc of entry.toolCalls) {
-          div.appendChild(renderToolCall(tc));
+          div.appendChild(renderToolCall(tc, pendingApprovalMap, pendingDiffSet));
         }
       }
 
@@ -496,9 +694,10 @@ export function getChatScript(brandIconUri: string): string {
       messagesEl.appendChild(div);
     }
 
-    function renderToolCall(tc) {
+    function renderToolCall(tc, pendingApprovalMap, pendingDiffSet) {
       const card = document.createElement("div");
       card.className = "tool-call-card";
+      const effectiveStatus = getEffectiveToolStatus(tc, pendingApprovalMap);
 
       const header = document.createElement("div");
       header.className = "tool-call-header";
@@ -520,11 +719,11 @@ export function getChatScript(brandIconUri: string): string {
       pathEl.textContent = pathText;
       header.appendChild(pathEl);
 
-      if (tc.status === "pending") {
+      if (effectiveStatus === "pending") {
         const actions = document.createElement("div");
         actions.className = "tool-call-actions";
 
-        if (tc.type === "edit_file") {
+        if (pendingDiffSet.has(tc.id) && tc.type === "edit_file") {
           const diffBtn = document.createElement("button");
           diffBtn.className = "tool-btn";
           diffBtn.style.cssText = "border-color:var(--accent);color:var(--accent);";
@@ -548,14 +747,18 @@ export function getChatScript(brandIconUri: string): string {
         header.appendChild(actions);
       } else {
         const badge = document.createElement("span");
-        badge.className = "tool-status " + tc.status;
-        badge.textContent = tc.status;
+        badge.className = "tool-status " + effectiveStatus;
+        badge.textContent = effectiveStatus;
         header.appendChild(badge);
       }
 
       card.appendChild(header);
 
-      if (tc.type === "edit_file" && tc.search) {
+      if (
+        tc.type === "edit_file" &&
+        tc.search &&
+        (effectiveStatus === "pending" || pendingDiffSet.has(tc.id))
+      ) {
         const diffContainer = document.createElement("div");
         diffContainer.style.borderTop = "1px solid var(--border)";
         const searchLines = tc.search.split("\\n");
@@ -602,6 +805,490 @@ export function getChatScript(brandIconUri: string): string {
       return card;
     }
 
+    function renderHarnessPane(payload) {
+      if (!harnessPane) return;
+
+      const harnessState = getHarnessState(payload);
+      const pendingApprovals = Array.isArray(harnessState.pendingApprovals)
+        ? harnessState.pendingApprovals
+        : [];
+      const pendingDiffCount = Array.isArray(harnessState.pendingDiffs)
+        ? harnessState.pendingDiffs.length
+        : 0;
+      const todoItems = Array.isArray(harnessState.todoItems)
+        ? harnessState.todoItems
+        : [];
+      const runtimeHealth = getRuntimeHealth(payload);
+      const now = Date.now();
+      const backgroundTasks = (Array.isArray(harnessState.backgroundTasks)
+        ? harnessState.backgroundTasks
+        : []
+      ).filter((task) => {
+        const updatedAt = typeof task.updatedAt === "number" ? task.updatedAt : 0;
+        return (
+          task.status === "running" ||
+          task.status === "failed" ||
+          task.status === "interrupted" ||
+          now - updatedAt < 15000
+        );
+      }).slice(0, 3);
+
+      harnessPane.innerHTML = "";
+
+      if (
+        runtimeHealth.level === "ok" &&
+        !todoItems.length &&
+        !pendingApprovals.length &&
+        !backgroundTasks.length
+      ) {
+        harnessPane.style.display = "none";
+        harnessPane.classList.remove("active");
+        return;
+      }
+
+      harnessPane.style.display = "";
+      harnessPane.classList.add("active");
+
+      if (runtimeHealth.level !== "ok") {
+        const card = document.createElement("div");
+        card.className = "harness-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Status";
+        title.appendChild(label);
+
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent = runtimeHealth.summary || "Harness status update.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const badge = document.createElement("span");
+        badge.className = "harness-badge " + runtimeHealth.level;
+        badge.textContent = runtimeHealth.level;
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        if (Array.isArray(runtimeHealth.issues) && runtimeHealth.issues.length) {
+          const issues = document.createElement("div");
+          issues.className = "harness-health-list";
+          for (const issue of runtimeHealth.issues.slice(0, 3)) {
+            const item = document.createElement("div");
+            item.className = "harness-health-item";
+            item.textContent = issue;
+            issues.appendChild(item);
+          }
+          card.appendChild(issues);
+        }
+
+        if (Array.isArray(runtimeHealth.suggestions) && runtimeHealth.suggestions.length) {
+          const meta = document.createElement("div");
+          meta.className = "harness-card-meta";
+          meta.textContent = "Next: " + runtimeHealth.suggestions[0];
+          card.appendChild(meta);
+        }
+
+        if (Array.isArray(runtimeHealth.actions) && runtimeHealth.actions.length) {
+          const actions = document.createElement("div");
+          actions.className = "harness-card-actions";
+
+          for (const action of runtimeHealth.actions) {
+            const btn = document.createElement("button");
+            btn.className = "tool-btn tool-btn-approve";
+            btn.disabled = !!payload.busy;
+
+            if (action === "compact") {
+              btn.textContent = "Compact";
+              btn.onclick = () =>
+                vscode.postMessage({ type: "sendPrompt", prompt: "/compact" });
+            } else if (action === "refresh-models") {
+              btn.textContent = "Refresh Models";
+              btn.onclick = () => vscode.postMessage({ type: "refreshModels" });
+            } else if (action === "show-jobs") {
+              btn.textContent = "Jobs";
+              btn.onclick = () =>
+                vscode.postMessage({ type: "sendPrompt", prompt: "/jobs" });
+            } else {
+              continue;
+            }
+
+            actions.appendChild(btn);
+          }
+
+          if (actions.childElementCount) {
+            card.appendChild(actions);
+          }
+        }
+
+        harnessPane.appendChild(card);
+      }
+
+      if (todoItems.length) {
+        const card = document.createElement("div");
+        card.className = "harness-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Plan";
+        title.appendChild(label);
+
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent =
+          todoItems.length === 1
+            ? "1 tracked step for the current task."
+            : todoItems.length + " tracked steps for the current task.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const inProgressCount = todoItems.filter((item) => item.status === "in_progress").length;
+        const completedCount = todoItems.filter((item) => item.status === "completed").length;
+        const badge = document.createElement("span");
+        badge.className =
+          "harness-badge " + (
+            inProgressCount
+              ? "in_progress"
+              : completedCount === todoItems.length
+                ? "completed"
+                : "pending"
+          );
+        badge.textContent = inProgressCount
+          ? inProgressCount + " active"
+          : completedCount === todoItems.length
+            ? "done"
+            : (todoItems.length - completedCount) + " open";
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const list = document.createElement("div");
+        list.className = "harness-task-list";
+
+        for (const item of todoItems) {
+          const row = document.createElement("div");
+          row.className = "harness-task-row harness-todo-row " + item.status;
+
+          const top = document.createElement("div");
+          top.className = "harness-task-top";
+
+          const content = document.createElement("div");
+          content.className = "harness-todo-content";
+          content.textContent = item.content;
+          top.appendChild(content);
+
+          const itemBadge = document.createElement("span");
+          itemBadge.className = "harness-badge " + item.status;
+          itemBadge.textContent =
+            item.status === "in_progress"
+              ? "in progress"
+              : item.status;
+          top.appendChild(itemBadge);
+
+          row.appendChild(top);
+          list.appendChild(row);
+        }
+
+        card.appendChild(list);
+        harnessPane.appendChild(card);
+      }
+
+      if (pendingApprovals.length) {
+        const card = document.createElement("div");
+        card.className = "harness-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Approvals";
+        title.appendChild(label);
+
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent =
+          pendingApprovals.length === 1
+            ? "1 tool action is waiting for approval."
+            : pendingApprovals.length + " tool actions are waiting for approval.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const badge = document.createElement("span");
+        badge.className = "harness-badge pending";
+        badge.textContent = pendingApprovals.length + " pending";
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const meta = document.createElement("div");
+        meta.className = "harness-card-meta";
+        meta.textContent = pendingDiffCount
+          ? pendingDiffCount + " diff preview" + (pendingDiffCount === 1 ? "" : "s") + " ready in the chat cards below."
+          : "Review the tool cards in chat to approve or reject changes.";
+        card.appendChild(meta);
+
+        if (pendingApprovals.length > 1) {
+          const actions = document.createElement("div");
+          actions.className = "harness-card-actions";
+
+          const approveAll = document.createElement("button");
+          approveAll.className = "tool-btn tool-btn-approve";
+          approveAll.textContent = "Approve All";
+          approveAll.onclick = () => vscode.postMessage({ type: "approveAllToolCalls" });
+          actions.appendChild(approveAll);
+
+          const rejectAll = document.createElement("button");
+          rejectAll.className = "tool-btn tool-btn-reject";
+          rejectAll.textContent = "Reject All";
+          rejectAll.onclick = () => vscode.postMessage({ type: "rejectAllToolCalls" });
+          actions.appendChild(rejectAll);
+
+          card.appendChild(actions);
+        }
+
+        harnessPane.appendChild(card);
+      }
+
+      if (backgroundTasks.length) {
+        const card = document.createElement("div");
+        card.className = "harness-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Tasks";
+        title.appendChild(label);
+
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent =
+          backgroundTasks.length === 1
+            ? "1 background command is active or recently finished."
+            : backgroundTasks.length + " background commands are active or recently finished.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const runningCount = backgroundTasks.filter((task) => task.status === "running").length;
+        const cancelledCount = backgroundTasks.filter((task) => task.status === "cancelled").length;
+        const interruptedCount = backgroundTasks.filter((task) => task.status === "interrupted").length;
+        const badge = document.createElement("span");
+        badge.className =
+          "harness-badge " + (
+            runningCount
+              ? "running"
+              : backgroundTasks.some((task) => task.status === "failed")
+                ? "failed"
+                : interruptedCount
+                  ? "interrupted"
+                : cancelledCount
+                  ? "cancelled"
+                  : "completed"
+          );
+        badge.textContent = runningCount
+          ? runningCount + " running"
+          : backgroundTasks.some((task) => task.status === "failed")
+            ? "attention"
+            : interruptedCount
+              ? interruptedCount + " interrupted"
+            : cancelledCount
+              ? cancelledCount + " cancelled"
+              : "recent";
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const clearableCount = backgroundTasks.filter((task) => task.status !== "running").length;
+        if (clearableCount) {
+          const actions = document.createElement("div");
+          actions.className = "harness-card-actions";
+
+          const clearBtn = document.createElement("button");
+          clearBtn.className = "tool-btn";
+          clearBtn.textContent =
+            clearableCount === 1 ? "Clear Finished Job" : "Clear Finished Jobs";
+          clearBtn.disabled = !!payload.busy;
+          clearBtn.onclick = () =>
+            vscode.postMessage({ type: "clearBackgroundTasks" });
+          actions.appendChild(clearBtn);
+
+          card.appendChild(actions);
+        }
+
+        const list = document.createElement("div");
+        list.className = "harness-task-list";
+
+        for (const task of backgroundTasks) {
+          const row = document.createElement("div");
+          row.className = "harness-task-row";
+
+          const top = document.createElement("div");
+          top.className = "harness-task-top";
+
+          const command = document.createElement("div");
+          command.className = "harness-task-command";
+          command.textContent = task.command || task.id;
+          command.title = task.command || task.id;
+          top.appendChild(command);
+
+          const taskBadge = document.createElement("span");
+          taskBadge.className = "harness-badge " + task.status;
+          taskBadge.textContent =
+            task.status === "completed" && typeof task.exitCode === "number"
+              ? "completed (" + task.exitCode + ")"
+              : task.status === "failed" && typeof task.exitCode === "number"
+                ? "failed (" + task.exitCode + ")"
+                : task.status === "interrupted"
+                  ? "interrupted"
+                : task.status;
+          top.appendChild(taskBadge);
+          row.appendChild(top);
+
+          if (task.status === "running") {
+            const actions = document.createElement("div");
+            actions.className = "harness-task-actions";
+
+            const detailsBtn = document.createElement("button");
+            detailsBtn.className = "tool-btn";
+            detailsBtn.textContent = "Details";
+            detailsBtn.disabled = !!payload.busy;
+            detailsBtn.onclick = () =>
+              vscode.postMessage({ type: "sendPrompt", prompt: "/jobs " + task.id });
+            actions.appendChild(detailsBtn);
+
+            const cancelBtn = document.createElement("button");
+            cancelBtn.className = "tool-btn tool-btn-reject";
+            cancelBtn.textContent = "Cancel";
+            cancelBtn.disabled = !!payload.busy;
+            cancelBtn.onclick = () =>
+              vscode.postMessage({ type: "cancelBackgroundTask", taskId: task.id });
+            actions.appendChild(cancelBtn);
+
+            row.appendChild(actions);
+          } else {
+            const actions = document.createElement("div");
+            actions.className = "harness-task-actions";
+
+            const detailsBtn = document.createElement("button");
+            detailsBtn.className = "tool-btn";
+            detailsBtn.textContent = "Details";
+            detailsBtn.disabled = !!payload.busy;
+            detailsBtn.onclick = () =>
+              vscode.postMessage({ type: "sendPrompt", prompt: "/jobs " + task.id });
+            actions.appendChild(detailsBtn);
+
+            const rerunBtn = document.createElement("button");
+            rerunBtn.className = "tool-btn tool-btn-approve";
+            rerunBtn.textContent = "Rerun";
+            rerunBtn.disabled = !!payload.busy;
+            rerunBtn.onclick = () =>
+              vscode.postMessage({ type: "rerunBackgroundTask", taskId: task.id });
+            actions.appendChild(rerunBtn);
+
+            row.appendChild(actions);
+          }
+
+          if (task.outputPreview) {
+            const preview = document.createElement("div");
+            preview.className = "harness-task-preview";
+            preview.textContent = task.outputPreview.length > 220
+              ? task.outputPreview.slice(-220)
+              : task.outputPreview;
+            row.appendChild(preview);
+          }
+
+          list.appendChild(row);
+        }
+
+        card.appendChild(list);
+        harnessPane.appendChild(card);
+      }
+    }
+
+    function renderActiveSkills(payload) {
+      if (!activeSkillsEl) return;
+
+      const activeSkills = Array.isArray(payload.activeSkills) ? payload.activeSkills : [];
+      activeSkillsEl.innerHTML = "";
+
+      if (!activeSkills.length) {
+        activeSkillsEl.style.display = "none";
+        activeSkillsEl.classList.remove("active");
+        return;
+      }
+
+      activeSkillsEl.style.display = "";
+      activeSkillsEl.classList.add("active");
+
+      const label = document.createElement("span");
+      label.className = "active-skills-label";
+      label.textContent = activeSkills.length === 1 ? "Active skill" : "Active skills";
+      activeSkillsEl.appendChild(label);
+
+      const list = document.createElement("div");
+      list.className = "active-skills-list";
+
+      for (const skill of activeSkills) {
+        const chip = document.createElement("div");
+        chip.className = "active-skill-chip";
+        chip.title = skill.description || skill.name;
+
+        const name = document.createElement("span");
+        name.className = "active-skill-name";
+        name.textContent = skill.name;
+        chip.appendChild(name);
+
+        if (skill.note) {
+          const note = document.createElement("span");
+          note.className = "active-skill-note";
+          note.textContent = skill.note;
+          note.title = skill.note;
+          chip.appendChild(note);
+        }
+
+        if (!payload.busy) {
+          const removeBtn = document.createElement("button");
+          removeBtn.className = "active-skill-remove";
+          removeBtn.type = "button";
+          removeBtn.title = "Remove skill";
+          removeBtn.textContent = "×";
+          removeBtn.onclick = () =>
+            vscode.postMessage({ type: "removeActiveSkill", skillId: skill.id });
+          chip.appendChild(removeBtn);
+        }
+
+        list.appendChild(chip);
+      }
+
+      activeSkillsEl.appendChild(list);
+
+      if (activeSkills.length > 1 && !payload.busy) {
+        const clearBtn = document.createElement("button");
+        clearBtn.className = "active-skills-clear";
+        clearBtn.type = "button";
+        clearBtn.textContent = "Clear";
+        clearBtn.onclick = () => vscode.postMessage({ type: "clearActiveSkills" });
+        activeSkillsEl.appendChild(clearBtn);
+      }
+    }
+
     function scrollToBottom() {
       requestAnimationFrame(() => {
         messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -619,15 +1306,10 @@ export function getChatScript(brandIconUri: string): string {
       div.className = "msg msg-assistant";
       div.id = "streaming-msg";
 
-      const label = document.createElement("div");
-      label.className = "msg-label";
-      label.textContent = "PocketAI";
-      div.appendChild(label);
-
       const body = document.createElement("div");
       body.className = "msg-body";
       body.id = "streaming-body";
-      body.innerHTML = '<span class="streaming-cursor"></span>';
+      body.innerHTML = '<div class="stream-status">Thinking...</div><span class="streaming-cursor"></span>';
       div.appendChild(body);
 
       messagesEl.appendChild(div);
@@ -641,8 +1323,25 @@ export function getChatScript(brandIconUri: string): string {
       if (streamingEl) {
         const trimmed = streamingText.trim();
         let statusLabel = "";
+        const fallbackLabel = trimmed
+          ? ""
+          : '<div class="stream-status">Thinking...</div>';
         const singleLine = !trimmed.includes("\\n");
-        if (singleLine && /^@read_file:\\s*.+$/.test(trimmed)) {
+        if (singleLine && /^@list_tools(?::\\s*.+)?$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Inspecting tools...</div>';
+        } else if (singleLine && /^@list_skills(?::\\s*.+)?$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Inspecting skills...</div>';
+        } else if (singleLine && /^@run_skill:\\s*.+$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Activating skill...</div>';
+        } else if (singleLine && /^@diagnostics(?::\\s*.+)?$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Inspecting diagnostics...</div>';
+        } else if (singleLine && /^@go_to_definition:\\s*.+$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Resolving definition...</div>';
+        } else if (singleLine && /^@find_references:\\s*.+$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Finding references...</div>';
+        } else if (singleLine && /^@document_symbols:\\s*.+$/.test(trimmed)) {
+          statusLabel = '<div class="stream-status">Inspecting document symbols...</div>';
+        } else if (singleLine && /^@read_file:\\s*.+$/.test(trimmed)) {
           statusLabel = '<div class="stream-status">Reading file...</div>';
         } else if (singleLine && /^@web_search:\\s*.+$/.test(trimmed)) {
           statusLabel = '<div class="stream-status">Searching the web...</div>';
@@ -661,7 +1360,9 @@ export function getChatScript(brandIconUri: string): string {
         } else if (singleLine && /^@git_commit:\\s*.+$/.test(trimmed)) {
           statusLabel = '<div class="stream-status">Committing...</div>';
         }
-        streamingEl.innerHTML = (statusLabel || formatThinkBlocks(streamingText)) + '<span class="streaming-cursor"></span>';
+        streamingEl.innerHTML =
+          (statusLabel || fallbackLabel || formatThinkBlocks(streamingText)) +
+          '<span class="streaming-cursor"></span>';
         scrollToBottom();
       }
     }
@@ -794,12 +1495,34 @@ export function getChatScript(brandIconUri: string): string {
       streamingText = "";
 
       const currentMode = payload.mode || "ask";
-      modeSelector.querySelectorAll(".mode-btn").forEach(btn => {
-        btn.classList.toggle("active", btn.getAttribute("data-mode") === currentMode);
-      });
+      if (modeTriggerLabel) {
+        modeTriggerLabel.textContent = MODE_LABELS[currentMode] || "Ask";
+      }
+      if (modeMenu) {
+        modeMenu.querySelectorAll("[data-mode]").forEach((btn) => {
+          btn.classList.toggle("active", btn.getAttribute("data-mode") === currentMode);
+        });
+      }
 
       statusText.textContent = payload.status || "";
       promptEl.disabled = !!payload.busy;
+      if (attachmentBtn) attachmentBtn.disabled = !!payload.busy;
+      if (attachUploadAction) attachUploadAction.disabled = !!payload.busy;
+      if (attachmentInput) attachmentInput.disabled = !!payload.busy;
+      if (modeTrigger) modeTrigger.disabled = !!payload.busy;
+      if (modelTrigger) {
+        modelTrigger.disabled =
+          !!payload.busy ||
+          (!Array.isArray(payload.models) || payload.models.length === 0) &&
+            !payload.selectedModel;
+      }
+      if (reasoningTrigger) {
+        reasoningTrigger.disabled =
+          !!payload.busy ||
+          !payload.showReasoningControl ||
+          !Array.isArray(payload.reasoningOptions) ||
+          payload.reasoningOptions.length === 0;
+      }
 
       if (payload.busy) {
         sendBtn.className = "cancel-btn";
@@ -827,6 +1550,7 @@ export function getChatScript(brandIconUri: string): string {
       }
       renderModelSelect(payload);
       renderReasoningSelect(payload);
+      renderActiveSkills(payload);
 
       const projectBadge = document.getElementById("projectBadge");
       if (projectBadge) {
@@ -848,6 +1572,7 @@ export function getChatScript(brandIconUri: string): string {
       }
 
       renderMessages(payload);
+      renderHarnessPane(payload);
       renderSessions(payload);
       renderResourceWarnings(payload);
     }
@@ -862,6 +1587,7 @@ export function getChatScript(brandIconUri: string): string {
       const selectedModel = payload.selectedModel || "";
 
       modelSelect.innerHTML = "";
+      if (modelMenu) modelMenu.innerHTML = "";
 
       if (selectedModel && !models.includes(selectedModel)) {
         const unavailableOpt = document.createElement("option");
@@ -869,6 +1595,15 @@ export function getChatScript(brandIconUri: string): string {
         unavailableOpt.textContent = selectedModel + " (unavailable)";
         unavailableOpt.selected = true;
         modelSelect.appendChild(unavailableOpt);
+
+        if (modelMenu) {
+          const unavailableBtn = document.createElement("button");
+          unavailableBtn.className = "composer-menu-item active";
+          unavailableBtn.type = "button";
+          unavailableBtn.setAttribute("data-model-id", selectedModel);
+          unavailableBtn.textContent = selectedModel + " (unavailable)";
+          modelMenu.appendChild(unavailableBtn);
+        }
       }
 
       for (const modelId of models) {
@@ -877,6 +1612,16 @@ export function getChatScript(brandIconUri: string): string {
         opt.textContent = modelId;
         if (modelId === selectedModel) opt.selected = true;
         modelSelect.appendChild(opt);
+
+        if (modelMenu) {
+          const item = document.createElement("button");
+          item.className =
+            "composer-menu-item" + (modelId === selectedModel ? " active" : "");
+          item.type = "button";
+          item.setAttribute("data-model-id", modelId);
+          item.textContent = modelId;
+          modelMenu.appendChild(item);
+        }
       }
 
       if (!modelSelect.options.length) {
@@ -885,10 +1630,32 @@ export function getChatScript(brandIconUri: string): string {
         emptyOpt.textContent = "No models available";
         emptyOpt.selected = true;
         modelSelect.appendChild(emptyOpt);
+
+        if (modelMenu) {
+          const emptyItem = document.createElement("button");
+          emptyItem.className = "composer-menu-item";
+          emptyItem.type = "button";
+          emptyItem.disabled = true;
+          emptyItem.textContent = "No models available";
+          modelMenu.appendChild(emptyItem);
+        }
       }
 
       if (models.length && !selectedModel) {
         modelSelect.value = models[0];
+      }
+
+      if (modelTriggerLabel) {
+        modelTriggerLabel.textContent =
+          selectedModel ||
+          modelSelect.value ||
+          "No models available";
+      }
+      if (modelTrigger) {
+        modelTrigger.title =
+          selectedModel ||
+          modelSelect.value ||
+          "No models available";
       }
 
       modelSelect.disabled = !!payload.busy || models.length === 0;
@@ -899,24 +1666,73 @@ export function getChatScript(brandIconUri: string): string {
       const options = Array.isArray(payload.reasoningOptions) ? payload.reasoningOptions : [];
       const selectedReasoningEffort = payload.selectedReasoningEffort || "";
 
-      reasoningSelect.style.display = showControl ? "" : "none";
+      reasoningSelect.style.display = "none";
+      if (reasoningMenuWrap) {
+        reasoningMenuWrap.style.display = showControl ? "" : "none";
+      }
       reasoningSelect.innerHTML = "";
+      if (reasoningMenu) reasoningMenu.innerHTML = "";
 
-      if (!showControl) return;
+      if (!showControl) {
+        closeReasoningMenu();
+        return;
+      }
+
+      if (selectedReasoningEffort && !options.includes(selectedReasoningEffort)) {
+        const unavailableOpt = document.createElement("option");
+        unavailableOpt.value = selectedReasoningEffort;
+        unavailableOpt.textContent = formatReasoningLabel(selectedReasoningEffort) + " (unavailable)";
+        unavailableOpt.selected = true;
+        reasoningSelect.appendChild(unavailableOpt);
+
+        if (reasoningMenu) {
+          const unavailableItem = document.createElement("button");
+          unavailableItem.className = "composer-menu-item active";
+          unavailableItem.type = "button";
+          unavailableItem.setAttribute("data-reasoning-effort", selectedReasoningEffort);
+          unavailableItem.textContent = formatReasoningLabel(selectedReasoningEffort) + " (unavailable)";
+          reasoningMenu.appendChild(unavailableItem);
+        }
+      }
 
       const autoOpt = document.createElement("option");
       autoOpt.value = "";
-      autoOpt.textContent = "Reasoning: Auto";
+      autoOpt.textContent = "Auto";
       autoOpt.selected = selectedReasoningEffort === "";
       reasoningSelect.appendChild(autoOpt);
+      if (reasoningMenu) {
+        const autoItem = document.createElement("button");
+        autoItem.className =
+          "composer-menu-item" + (selectedReasoningEffort === "" ? " active" : "");
+        autoItem.type = "button";
+        autoItem.setAttribute("data-reasoning-effort", "");
+        autoItem.textContent = "Auto";
+        reasoningMenu.appendChild(autoItem);
+      }
 
       for (const option of options) {
         const opt = document.createElement("option");
         opt.value = option;
-        opt.textContent =
-          "Reasoning: " + option.charAt(0).toUpperCase() + option.slice(1);
+        opt.textContent = formatReasoningLabel(option);
         if (option === selectedReasoningEffort) opt.selected = true;
         reasoningSelect.appendChild(opt);
+
+        if (reasoningMenu) {
+          const item = document.createElement("button");
+          item.className =
+            "composer-menu-item" + (option === selectedReasoningEffort ? " active" : "");
+          item.type = "button";
+          item.setAttribute("data-reasoning-effort", option);
+          item.textContent = formatReasoningLabel(option);
+          reasoningMenu.appendChild(item);
+        }
+      }
+
+      if (reasoningTriggerLabel) {
+        reasoningTriggerLabel.textContent = formatReasoningLabel(selectedReasoningEffort);
+      }
+      if (reasoningTrigger) {
+        reasoningTrigger.title = "Reasoning: " + formatReasoningLabel(selectedReasoningEffort);
       }
 
       reasoningSelect.disabled = !!payload.busy || options.length === 0;
@@ -996,38 +1812,269 @@ export function getChatScript(brandIconUri: string): string {
       }
     });
 
-    /* ── Image attachments ── */
+    /* ── Composer attachments ── */
     let pendingImages = [];
-    const imagePreviewEl = document.getElementById("imagePreview");
+    let pendingFiles = [];
+    const attachmentPreviewEl = document.getElementById("attachmentPreview");
 
     function addImage(data, mimeType, name) {
       pendingImages.push({ data, mimeType, name });
-      renderImagePreviews();
+      renderAttachmentPreviews();
     }
 
-    function renderImagePreviews() {
-      if (!imagePreviewEl) return;
-      imagePreviewEl.innerHTML = "";
-      if (!pendingImages.length) {
-        imagePreviewEl.style.display = "none";
+    function addFileAttachment(file) {
+      pendingFiles.push(file);
+      renderAttachmentPreviews();
+    }
+
+    function renderAttachmentPreviews() {
+      if (!attachmentPreviewEl) return;
+      attachmentPreviewEl.innerHTML = "";
+      if (!pendingImages.length && !pendingFiles.length) {
+        attachmentPreviewEl.style.display = "none";
         return;
       }
-      imagePreviewEl.style.display = "flex";
+
+      attachmentPreviewEl.style.display = "flex";
+
       pendingImages.forEach((img, i) => {
         const wrap = document.createElement("div");
-        wrap.className = "image-preview-item";
+        wrap.className = "attachment-preview-item image";
+
+        const thumbWrap = document.createElement("div");
+        thumbWrap.className = "attachment-preview-thumb";
+
         const thumb = document.createElement("img");
         thumb.src = "data:" + img.mimeType + ";base64," + img.data;
         thumb.alt = img.name || "image";
-        wrap.appendChild(thumb);
+        thumbWrap.appendChild(thumb);
+        wrap.appendChild(thumbWrap);
+
+        const contentWrap = document.createElement("div");
+        contentWrap.className = "attachment-preview-content";
+
+        const nameEl = document.createElement("div");
+        nameEl.className = "attachment-file-name";
+        nameEl.textContent = img.name || "Image attachment";
+        contentWrap.appendChild(nameEl);
+
+        const metaEl = document.createElement("div");
+        metaEl.className = "attachment-file-meta";
+        metaEl.textContent = buildPendingImageMetaLabel(img);
+        contentWrap.appendChild(metaEl);
+
+        wrap.appendChild(contentWrap);
+
         const removeBtn = document.createElement("button");
-        removeBtn.className = "image-preview-remove";
+        removeBtn.className = "attachment-preview-remove";
         removeBtn.textContent = "\\u00d7";
-        removeBtn.onclick = () => { pendingImages.splice(i, 1); renderImagePreviews(); };
+        removeBtn.onclick = () => {
+          pendingImages.splice(i, 1);
+          renderAttachmentPreviews();
+        };
         wrap.appendChild(removeBtn);
-        imagePreviewEl.appendChild(wrap);
+        attachmentPreviewEl.appendChild(wrap);
+      });
+
+      pendingFiles.forEach((file, i) => {
+        const wrap = document.createElement("div");
+        wrap.className = "attachment-preview-item file";
+
+        const contentWrap = document.createElement("div");
+        contentWrap.className = "attachment-preview-content";
+
+        const nameEl = document.createElement("div");
+        nameEl.className = "attachment-file-name";
+        nameEl.textContent = file.name || "attached file";
+        contentWrap.appendChild(nameEl);
+
+        const metaEl = document.createElement("div");
+        metaEl.className = "attachment-file-meta";
+        metaEl.textContent = buildFileMetaLabel(file) || "attached file";
+        contentWrap.appendChild(metaEl);
+
+        wrap.appendChild(contentWrap);
+
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "attachment-preview-remove";
+        removeBtn.textContent = "\\u00d7";
+        removeBtn.onclick = () => {
+          pendingFiles.splice(i, 1);
+          renderAttachmentPreviews();
+        };
+        wrap.appendChild(removeBtn);
+        attachmentPreviewEl.appendChild(wrap);
       });
     }
+
+    function isProbablyTextFile(file) {
+      const type = (file.type || "").toLowerCase();
+      const name = (file.name || "").split(/[\\\\/]/).pop() || "";
+      if (!type && TEXT_ATTACHMENT_NAME_RE.test(name)) return true;
+      if (type.startsWith("text/")) return true;
+      if (
+        type.includes("json") ||
+        type.includes("xml") ||
+        type.includes("yaml") ||
+        type.includes("javascript") ||
+        type.includes("typescript") ||
+        type.includes("markdown") ||
+        type.includes("graphql") ||
+        type.includes("sql") ||
+        type.includes("x-sh")
+      ) {
+        return true;
+      }
+      return TEXT_ATTACHMENT_EXTENSION_RE.test(name) || TEXT_ATTACHMENT_NAME_RE.test(name);
+    }
+
+    function looksBinaryText(text) {
+      const sample = (text || "").slice(0, 4000);
+      if (!sample) return false;
+      const nullCount = (sample.match(/\\u0000/g) || []).length;
+      const replacementCount = (sample.match(/\\uFFFD/g) || []).length;
+      return nullCount > 0 || replacementCount > sample.length * 0.02;
+    }
+
+    function readFileAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+        reader.readAsText(file);
+      });
+    }
+
+    async function handleSelectedFiles(fileList) {
+      const files = Array.from(fileList || []);
+      if (!files.length) return;
+
+      let attachedCount = 0;
+      let truncatedCount = 0;
+      let skippedBinaryCount = 0;
+      let skippedLargeCount = 0;
+
+      for (const file of files) {
+        if (file.type.startsWith("image/")) {
+          const result = await readFileAsDataUrl(file);
+          if (typeof result !== "string") continue;
+          const base64 = result.split(",")[1];
+          addImage(base64, file.type, file.name || "attached-image");
+          attachedCount += 1;
+          continue;
+        }
+
+        if (file.size > MAX_TEXT_ATTACHMENT_BYTES) {
+          skippedLargeCount += 1;
+          continue;
+        }
+
+        const result = await readFileAsText(file);
+        if (typeof result !== "string") continue;
+
+        const normalized = result.replace(/\\r\\n/g, "\\n");
+        if (!isProbablyTextFile(file) && looksBinaryText(normalized)) {
+          skippedBinaryCount += 1;
+          continue;
+        }
+        const truncated = normalized.length > MAX_TEXT_ATTACHMENT_CHARS;
+        const content = truncated
+          ? normalized.slice(0, MAX_TEXT_ATTACHMENT_CHARS) + "\\n... [truncated]"
+          : normalized;
+
+        addFileAttachment({
+          name: file.name || "attached-file",
+          mimeType: file.type || "text/plain",
+          content,
+          sizeBytes: file.size || content.length,
+          truncated,
+        });
+
+        attachedCount += 1;
+        if (truncated) truncatedCount += 1;
+      }
+
+      if (attachedCount || truncatedCount || skippedBinaryCount || skippedLargeCount) {
+        const parts = [];
+        if (attachedCount) {
+          parts.push(
+            "Attached " +
+              attachedCount +
+              " item" +
+              (attachedCount === 1 ? "" : "s"),
+          );
+        }
+        if (truncatedCount) {
+          parts.push(
+            truncatedCount +
+              " truncated",
+          );
+        }
+        if (skippedBinaryCount) {
+          parts.push(
+            skippedBinaryCount +
+              " binary file" +
+              (skippedBinaryCount === 1 ? "" : "s") +
+              " skipped",
+          );
+        }
+        if (skippedLargeCount) {
+          parts.push(
+            skippedLargeCount +
+              " large file" +
+              (skippedLargeCount === 1 ? "" : "s") +
+              " skipped",
+          );
+        }
+        setComposerNotice(parts.join(" · "));
+      }
+    }
+
+    function buildAttachmentOnlyPrompt() {
+      if (pendingImages.length && pendingFiles.length) return "(see attached files and images)";
+      if (pendingFiles.length > 1) return "(see attached files)";
+      if (pendingFiles.length === 1) return "(see attached file)";
+      if (pendingImages.length > 1) return "(see attached images)";
+      return "(see attached image)";
+    }
+
+    attachmentBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (state && state.busy) return;
+      closeModeMenu();
+      closeModelMenu();
+      closeReasoningMenu();
+      attachMenu.classList.toggle("open");
+    });
+
+    attachUploadAction.addEventListener("click", () => {
+      closeAttachMenu();
+      attachmentInput.click();
+    });
+
+    attachmentInput.addEventListener("change", async () => {
+      try {
+        await handleSelectedFiles(attachmentInput.files);
+      } catch (error) {
+        setComposerNotice(
+          "Attachment error: " +
+            (error && error.message ? error.message : "Could not read file."),
+        );
+      } finally {
+        attachmentInput.value = "";
+        promptEl.focus();
+      }
+    });
 
     // Paste handler for images
     promptEl.addEventListener("paste", (e) => {
@@ -1044,6 +2091,7 @@ export function getChatScript(brandIconUri: string): string {
             if (typeof result !== "string") return;
             const base64 = result.split(",")[1];
             addImage(base64, item.type, file.name || "pasted-image");
+            setComposerNotice("Image attached");
           };
           reader.readAsDataURL(file);
           break;
@@ -1053,16 +2101,24 @@ export function getChatScript(brandIconUri: string): string {
 
     function submitPrompt() {
       const text = promptEl.value.trim();
-      if (!text && !pendingImages.length) return;
+      if (!text && !pendingImages.length && !pendingFiles.length) return;
       if (state && state.busy) return;
-      const msg = { type: "sendPrompt", prompt: text || "(see attached image)" };
+      closeComposerMenus();
+      const msg = {
+        type: "sendPrompt",
+        prompt: text || buildAttachmentOnlyPrompt(),
+      };
       if (pendingImages.length) {
         msg.images = pendingImages.slice();
+      }
+      if (pendingFiles.length) {
+        msg.files = pendingFiles.slice();
       }
       vscode.postMessage(msg);
       promptEl.value = "";
       pendingImages = [];
-      renderImagePreviews();
+      pendingFiles = [];
+      renderAttachmentPreviews();
       resizeInput();
     }
 
@@ -1090,11 +2146,63 @@ export function getChatScript(brandIconUri: string): string {
     promptEl.addEventListener("input", resizeInput);
     sendBtn.addEventListener("click", submitPrompt);
 
-    modeSelector.addEventListener("click", (e) => {
+    modeTrigger.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (state && state.busy) return;
+      closeAttachMenu();
+      closeModelMenu();
+      closeReasoningMenu();
+      modeMenu.classList.toggle("open");
+    });
+
+    modeMenu.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-mode]");
       if (!btn) return;
       const mode = btn.getAttribute("data-mode");
+      closeModeMenu();
       vscode.postMessage({ type: "setMode", mode: mode });
+    });
+
+    modelTrigger.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (state && state.busy) return;
+      closeAttachMenu();
+      closeModeMenu();
+      closeReasoningMenu();
+      modelMenu.classList.toggle("open");
+    });
+
+    modelMenu.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-model-id]");
+      if (!btn) return;
+      const modelId = btn.getAttribute("data-model-id");
+      if (!modelId) return;
+      closeModelMenu();
+      vscode.postMessage({ type: "selectModel", modelId: modelId });
+    });
+
+    reasoningTrigger.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (state && state.busy) return;
+      closeAttachMenu();
+      closeModeMenu();
+      closeModelMenu();
+      reasoningMenu.classList.toggle("open");
+    });
+
+    reasoningMenu.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-reasoning-effort]");
+      if (!btn) return;
+      const reasoningEffort = btn.getAttribute("data-reasoning-effort");
+      if (reasoningEffort === null) return;
+      closeReasoningMenu();
+      vscode.postMessage({
+        type: "selectReasoningEffort",
+        reasoningEffort: reasoningEffort,
+      });
     });
 
     sessionTrigger.addEventListener("click", () => {
@@ -1132,6 +2240,18 @@ export function getChatScript(brandIconUri: string): string {
       if (!sessionMenu.contains(e.target) && !sessionTrigger.contains(e.target)) {
         sessionMenu.classList.remove("open");
         sessionSearchWrap.style.display = "none";
+      }
+      if (modeMenuWrap && !modeMenuWrap.contains(e.target)) {
+        closeModeMenu();
+      }
+      if (modelMenuWrap && !modelMenuWrap.contains(e.target)) {
+        closeModelMenu();
+      }
+      if (reasoningMenuWrap && !reasoningMenuWrap.contains(e.target)) {
+        closeReasoningMenu();
+      }
+      if (attachMenuWrap && !attachMenuWrap.contains(e.target)) {
+        closeAttachMenu();
       }
     });
 

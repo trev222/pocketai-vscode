@@ -2,7 +2,13 @@ import * as fs from "fs";
 import * as path from "path";
 import * as child_process from "child_process";
 import * as vscode from "vscode";
-import type { ToolCall, ToolCallType, ChatSession } from "./types";
+import type {
+  ToolCall,
+  ToolCallType,
+  ChatSession,
+  HarnessBackgroundTask,
+  HarnessBackgroundTaskStatus,
+} from "./types";
 import { formatFileSize } from "./helpers";
 import { checkPermissionRules } from "./permissions";
 import { runHooks } from "./hooks";
@@ -20,6 +26,14 @@ const filesReadInSession = new Set<string>();
 /** Clear read tracking (call on new session). */
 export function clearReadTracking() {
   filesReadInSession.clear();
+}
+
+export function hasReadFileInSession(filePath: string) {
+  return filesReadInSession.has(filePath);
+}
+
+export function markFileReadInSession(filePath: string) {
+  filesReadInSession.add(filePath);
 }
 
 /** Returns the primary argument for a tool call (used for permission checks). */
@@ -123,6 +137,199 @@ export async function executeToolCall(
         return result;
       } catch (e) {
         return `Error reading file: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
+    /*  OPEN FILE                                                        */
+    /* ================================================================ */
+    case "open_file": {
+      try {
+        const uri = vscode.Uri.file(fullPath);
+        const document = await vscode.workspace.openTextDocument(uri);
+        const hasLine = toolCall.line !== undefined;
+        const position = hasLine
+          ? new vscode.Position(
+              Math.max(0, (toolCall.line ?? 1) - 1),
+              Math.max(0, toolCall.character ?? 0),
+            )
+          : undefined;
+        const selection = position ? new vscode.Range(position, position) : undefined;
+        const editor = await vscode.window.showTextDocument(document, {
+          preview: false,
+          preserveFocus: false,
+          selection,
+        });
+        if (selection) {
+          editor.revealRange(
+            selection,
+            vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+          );
+        }
+        return position
+          ? `Opened \`${toolCall.filePath}\` at ${position.line + 1}:${position.character}.`
+          : `Opened \`${toolCall.filePath}\`.`;
+      } catch (e) {
+        return `Error opening file: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
+    /*  OPEN DEFINITION                                                  */
+    /* ================================================================ */
+    case "open_definition": {
+      try {
+        if (toolCall.line === undefined || toolCall.character === undefined) {
+          return "Error: open_definition requires line and character.";
+        }
+        const uri = vscode.Uri.file(fullPath);
+        const position = new vscode.Position(
+          Math.max(0, toolCall.line - 1),
+          Math.max(0, toolCall.character),
+        );
+        const results = await vscode.commands.executeCommand<
+          Array<vscode.Location | vscode.LocationLink>
+        >(
+          "vscode.executeDefinitionProvider",
+          uri,
+          position,
+        );
+        if (!results?.length) {
+          return `No definition found at \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}.`;
+        }
+        const first = results[0];
+        const targetUri = "targetUri" in first ? first.targetUri : first.uri;
+        const targetRange = "targetUri" in first
+          ? (first.targetSelectionRange ?? first.targetRange)
+          : first.range;
+        const document = await vscode.workspace.openTextDocument(targetUri);
+        const editor = await vscode.window.showTextDocument(document, {
+          preview: false,
+          preserveFocus: false,
+          selection: targetRange,
+        });
+        editor.revealRange(
+          targetRange,
+          vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+        );
+        const relativePath = vscode.workspace.asRelativePath(targetUri, false);
+        return `Opened definition at \`${relativePath || targetUri.fsPath}\`:${targetRange.start.line + 1}:${targetRange.start.character}.`;
+      } catch (e) {
+        return `Error opening definition: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
+    /*  WORKSPACE SYMBOLS                                                */
+    /* ================================================================ */
+    case "workspace_symbols": {
+      try {
+        const query = toolCall.query?.trim() || "";
+        if (!query) {
+          return "Error: workspace_symbols requires a query.";
+        }
+        const results = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+          "vscode.executeWorkspaceSymbolProvider",
+          query,
+        );
+        if (!results?.length) {
+          return `No workspace symbols matched "${query}".`;
+        }
+        const visible = results.slice(0, 200);
+        const lines = visible.map((symbol) => {
+          const relativePath = vscode.workspace.asRelativePath(symbol.location.uri, false);
+          const container = symbol.containerName ? ` (${symbol.containerName})` : "";
+          return `- ${relativePath}:${symbol.location.range.start.line + 1}:${symbol.location.range.start.character} ${symbol.name}${container}`;
+        });
+        return `Workspace symbols matching "${query}" (${results.length}):\n${lines.join("\n")}${results.length > visible.length ? `\n... ${results.length - visible.length} more symbols not shown.` : ""}`;
+      } catch (e) {
+        return `Error searching workspace symbols: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
+    /*  HOVER SYMBOL                                                     */
+    /* ================================================================ */
+    case "hover_symbol": {
+      try {
+        if (toolCall.line === undefined || toolCall.character === undefined) {
+          return "Error: hover_symbol requires line and character.";
+        }
+        const uri = vscode.Uri.file(fullPath);
+        const position = new vscode.Position(
+          Math.max(0, toolCall.line - 1),
+          Math.max(0, toolCall.character),
+        );
+        const results = await vscode.commands.executeCommand<vscode.Hover[]>(
+          "vscode.executeHoverProvider",
+          uri,
+          position,
+        );
+        if (!results?.length) {
+          return `No hover information found at \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}.`;
+        }
+        const blocks = results
+          .flatMap((hover) =>
+            hover.contents.map((content) => {
+              if (typeof content === "string") return content;
+              if (content instanceof vscode.MarkdownString) return content.value;
+              return "value" in content
+                ? `\`\`\`${content.language || ""}\n${content.value}\n\`\`\``
+                : "";
+            }),
+          )
+          .map((block) => block.trim())
+          .filter(Boolean)
+          .slice(0, 10);
+        if (!blocks.length) {
+          return `Hover provider returned no readable content for \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}.`;
+        }
+        return `Hover info for \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}:\n\n${blocks.join("\n\n---\n\n")}`;
+      } catch (e) {
+        return `Error reading hover info: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
+    /*  CODE ACTIONS                                                     */
+    /* ================================================================ */
+    case "code_actions": {
+      try {
+        if (toolCall.line === undefined || toolCall.character === undefined) {
+          return "Error: code_actions requires line and character.";
+        }
+        const uri = vscode.Uri.file(fullPath);
+        const position = new vscode.Position(
+          Math.max(0, toolCall.line - 1),
+          Math.max(0, toolCall.character),
+        );
+        const range = new vscode.Range(position, position);
+        const results = await vscode.commands.executeCommand<
+          Array<vscode.Command | vscode.CodeAction>
+        >(
+          "vscode.executeCodeActionProvider",
+          uri,
+          range,
+        );
+        if (!results?.length) {
+          return `No code actions found at \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}.`;
+        }
+        const visible = results.slice(0, 25);
+        const lines = visible.map((action) => {
+          if ("edit" in action || "kind" in action || "diagnostics" in action) {
+            const codeAction = action as vscode.CodeAction;
+            const kind = codeAction.kind?.value ? ` [${codeAction.kind.value}]` : "";
+            const disabled = codeAction.disabled
+              ? ` (disabled: ${codeAction.disabled.reason})`
+              : "";
+            return `- ${codeAction.title}${kind}${disabled}`;
+          }
+          const command = action as vscode.Command;
+          return `- ${command.title}${command.command ? ` [command: ${command.command}]` : ""}`;
+        });
+        return `Code actions for \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}:\n${lines.join("\n")}${results.length > visible.length ? `\n... ${results.length - visible.length} more code actions not shown.` : ""}`;
+      } catch (e) {
+        return `Error listing code actions: ${(e as Error).message}`;
       }
     }
 
@@ -350,12 +557,22 @@ export async function executeToolCall(
         const taskId = cmd.slice(10).trim();
         return checkBackgroundTask(taskId);
       }
+      if (cmd.startsWith("bg_cancel ")) {
+        const taskId = cmd.slice(10).trim();
+        return cancelBackgroundTask(taskId);
+      }
 
       const timeoutMs = Math.min(toolCall.timeout || 120000, 600000);
 
       if (toolCall.background) {
         const taskId = `bg_${Date.now().toString(36)}`;
-        const task = runCommandInBackground(cmd, rootPath, outputChannel, taskId);
+        const task = runCommandInBackground(
+          session.id,
+          cmd,
+          rootPath,
+          outputChannel,
+          taskId,
+        );
         backgroundTasks.set(taskId, task);
         return `Command started in background (id: ${taskId}): \`${cmd}\`\nUse run_command with "bg_status ${taskId}" to check status.`;
       }
@@ -795,14 +1012,24 @@ function extractTextFromHtml(html: string): string {
 /* ================================================================== */
 
 type BackgroundTask = {
+  id: string;
+  sessionId: string;
   cmd: string;
-  status: "running" | "completed" | "failed";
+  cwd: string;
+  proc?: child_process.ChildProcess;
+  status: HarnessBackgroundTaskStatus;
   output: string;
   exitCode?: number;
+  updatedAt: number;
 };
 
 const MAX_BACKGROUND_TASKS = 100;
 const backgroundTasks = new Map<string, BackgroundTask>();
+const backgroundTaskListeners = new Set<(task: BackgroundTaskSnapshot) => void>();
+
+export type BackgroundTaskSnapshot = HarnessBackgroundTask & {
+  sessionId: string;
+};
 
 function pruneBackgroundTasks() {
   if (backgroundTasks.size <= MAX_BACKGROUND_TASKS) return;
@@ -815,37 +1042,114 @@ function pruneBackgroundTasks() {
   }
 }
 
+function emitBackgroundTask(task: BackgroundTask) {
+  const snapshot = toBackgroundTaskSnapshot(task);
+  for (const listener of backgroundTaskListeners) {
+    listener(snapshot);
+  }
+}
+
+function toBackgroundTaskSnapshot(task: BackgroundTask): BackgroundTaskSnapshot {
+  return {
+    id: task.id,
+    sessionId: task.sessionId,
+    command: task.cmd,
+    status: task.status,
+    outputPreview:
+      task.output.length > 2000 ? task.output.slice(-2000) : task.output,
+    exitCode: task.exitCode,
+    updatedAt: task.updatedAt,
+    cwd: task.cwd,
+  };
+}
+
+export function restoreBackgroundTaskSnapshots(
+  tasks: BackgroundTaskSnapshot[],
+) {
+  for (const snapshot of tasks) {
+    const status =
+      snapshot.status === "running" ? "interrupted" : snapshot.status;
+    const restored: BackgroundTask = {
+      id: snapshot.id,
+      sessionId: snapshot.sessionId,
+      cmd: snapshot.command,
+      cwd: snapshot.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "",
+      status,
+      output: snapshot.outputPreview || "",
+      exitCode: snapshot.exitCode,
+      updatedAt: snapshot.updatedAt,
+    };
+
+    backgroundTasks.set(restored.id, restored);
+  }
+  pruneBackgroundTasks();
+}
+
+export function subscribeToBackgroundTasks(
+  listener: (task: BackgroundTaskSnapshot) => void,
+): vscode.Disposable {
+  backgroundTaskListeners.add(listener);
+  return new vscode.Disposable(() => {
+    backgroundTaskListeners.delete(listener);
+  });
+}
+
 function runCommandInBackground(
+  sessionId: string,
   cmd: string,
   cwd: string,
   outputChannel: vscode.OutputChannel,
   taskId: string,
 ): BackgroundTask {
-  const task: BackgroundTask = { cmd, status: "running", output: "" };
+  const task: BackgroundTask = {
+    id: taskId,
+    sessionId,
+    cmd,
+    cwd,
+    status: "running",
+    output: "",
+    updatedAt: Date.now(),
+  };
 
   outputChannel.appendLine(`▶ [${taskId}] Background: ${cmd}`);
+  emitBackgroundTask(task);
   const proc = child_process.spawn("sh", ["-c", cmd], {
     cwd,
     env: { ...process.env, TERM: "dumb" },
   });
+  task.proc = proc;
 
   proc.stdout?.on("data", (data: Buffer) => {
     const chunk = data.toString();
     task.output += chunk;
+    task.updatedAt = Date.now();
     outputChannel.append(chunk);
+    emitBackgroundTask(task);
   });
 
   proc.stderr?.on("data", (data: Buffer) => {
     const chunk = data.toString();
     task.output += chunk;
+    task.updatedAt = Date.now();
     outputChannel.append(chunk);
+    emitBackgroundTask(task);
   });
 
   proc.on("close", (code) => {
+    if (task.status === "cancelled") {
+      task.exitCode = code ?? 130;
+      task.updatedAt = Date.now();
+      outputChannel.appendLine(`▶ [${taskId}] Cancelled`);
+      pruneBackgroundTasks();
+      emitBackgroundTask(task);
+      return;
+    }
     task.exitCode = code ?? 1;
     task.status = code === 0 ? "completed" : "failed";
+    task.updatedAt = Date.now();
     outputChannel.appendLine(`▶ [${taskId}] Exit code: ${code}`);
     pruneBackgroundTasks();
+    emitBackgroundTask(task);
     void vscode.window.showInformationMessage(
       `Background command ${task.status}: ${cmd.slice(0, 50)}`,
     );
@@ -854,9 +1158,23 @@ function runCommandInBackground(
   proc.on("error", (err) => {
     task.status = "failed";
     task.output += `\nError: ${err.message}`;
+    task.updatedAt = Date.now();
+    emitBackgroundTask(task);
   });
 
   return task;
+}
+
+export function startBackgroundCommand(
+  sessionId: string,
+  cmd: string,
+  cwd: string,
+  outputChannel: vscode.OutputChannel,
+) {
+  const taskId = `bg_${Date.now().toString(36)}`;
+  const task = runCommandInBackground(sessionId, cmd, cwd, outputChannel, taskId);
+  backgroundTasks.set(taskId, task);
+  return taskId;
 }
 
 /** Check status of a background task. */
@@ -869,11 +1187,78 @@ export function checkBackgroundTask(taskId: string): string {
       ? task.output.slice(-5000) + "\n... [showing last 5000 chars]"
       : task.output;
 
-  return `Background task ${taskId} (${task.status}):\nCommand: \`${task.cmd}\`${task.exitCode !== undefined ? `\nExit code: ${task.exitCode}` : ""}\n\`\`\`\n${output}\n\`\`\``;
+  const note =
+    task.status === "interrupted"
+      ? "\nNote: This task was still running before PocketAI reloaded, so it is preserved as interrupted history."
+      : "";
+
+  return `Background task ${taskId} (${task.status}):\nCommand: \`${task.cmd}\`${task.cwd ? `\nCwd: \`${task.cwd}\`` : ""}${task.exitCode !== undefined ? `\nExit code: ${task.exitCode}` : ""}${note}\n\`\`\`\n${output}\n\`\`\``;
+}
+
+export function cancelBackgroundTask(
+  taskId: string,
+): string {
+  const task = backgroundTasks.get(taskId);
+  if (!task) return `No background task found with id: ${taskId}`;
+  if (task.status !== "running" || !task.proc) {
+    return `Background task ${taskId} is not currently running.`;
+  }
+
+  task.status = "cancelled";
+  task.output += `${task.output ? "\n" : ""}[Cancelled by user]`;
+  task.updatedAt = Date.now();
+  emitBackgroundTask(task);
+
+  try {
+    task.proc.kill("SIGTERM");
+    setTimeout(() => {
+      if (task.proc && task.status === "cancelled") {
+        try {
+          task.proc.kill("SIGKILL");
+        } catch {}
+      }
+    }, 1500);
+    return `Cancellation requested for background task ${taskId}.`;
+  } catch (error) {
+    task.status = "failed";
+    task.output += `\n[Cancellation error: ${(error as Error).message}]`;
+    task.updatedAt = Date.now();
+    emitBackgroundTask(task);
+    return `Failed to cancel background task ${taskId}: ${(error as Error).message}`;
+  }
+}
+
+export function rerunBackgroundTask(
+  taskId: string,
+  outputChannel: vscode.OutputChannel,
+): string {
+  const task = backgroundTasks.get(taskId);
+  if (!task) return `No background task found with id: ${taskId}`;
+  if (task.status === "running") {
+    return `Background task ${taskId} is still running. Cancel it before rerunning.`;
+  }
+
+  const nextTaskId = startBackgroundCommand(
+    task.sessionId,
+    task.cmd,
+    task.cwd,
+    outputChannel,
+  );
+  return `Reran background task ${taskId} as ${nextTaskId}: \`${task.cmd}\``;
+}
+
+export function removeBackgroundTasks(taskIds: string[]): number {
+  let removed = 0;
+  for (const taskId of taskIds) {
+    if (backgroundTasks.delete(taskId)) {
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 /** Runs a shell command with streaming output to the output channel. */
-function runCommandWithStreaming(
+export function runCommandWithStreaming(
   cmd: string,
   cwd: string,
   outputChannel: vscode.OutputChannel,
