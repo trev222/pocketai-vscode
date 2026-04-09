@@ -19,6 +19,7 @@ export class SessionManager {
   readonly sessions = new Map<string, ChatSession>();
   sidebarSessionId = "";
   nextSessionNumber = 1;
+  lastSelectedModel = "";
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -28,9 +29,12 @@ export class SessionManager {
 
     this.nextSessionNumber = Math.max(1, stored.nextSessionNumber || 1);
     this.sidebarSessionId = stored.sidebarSessionId || "";
+    this.lastSelectedModel = (stored.lastSelectedModel ?? "").trim();
     for (const session of stored.sessions ?? []) {
       this.sessions.set(session.id, {
         ...session,
+        selectedReasoningEffort:
+          (session as ChatSession).selectedReasoningEffort ?? "",
         busy: false,
         checkpoints: [],
         cumulativeTokens: (session as ChatSession).cumulativeTokens ?? { prompt: 0, completion: 0 },
@@ -38,6 +42,11 @@ export class SessionManager {
     }
     if (!this.sessions.has(this.sidebarSessionId)) {
       this.sidebarSessionId = this.getMostRecentSession()?.id ?? "";
+    }
+    if (!this.lastSelectedModel) {
+      this.lastSelectedModel =
+        this.getSessionsByRecency().find((session) => session.selectedModel)
+          ?.selectedModel ?? "";
     }
   }
 
@@ -49,6 +58,7 @@ export class SessionManager {
         e.images?.length ? { ...e, images: e.images.map((img) => ({ ...img, data: "" })) } : e,
       ),
       selectedModel: s.selectedModel,
+      selectedReasoningEffort: s.selectedReasoningEffort,
       selectedEndpoint: s.selectedEndpoint,
       status: s.status,
       updatedAt: s.updatedAt,
@@ -60,18 +70,17 @@ export class SessionManager {
       sessions,
       sidebarSessionId: this.sidebarSessionId,
       nextSessionNumber: this.nextSessionNumber,
+      lastSelectedModel: this.lastSelectedModel,
     } satisfies PersistedState);
   }
 
-  createSession(
-    models: string[],
-    getConfiguredModel: () => string,
-  ): ChatSession {
+  createSession(models: string[]): ChatSession {
     const session: ChatSession = {
       id: createId(),
       title: `Chat ${this.nextSessionNumber}`,
       transcript: [],
       selectedModel: "",
+      selectedReasoningEffort: "",
       selectedEndpoint: "",
       status: DEFAULT_STATUS,
       updatedAt: Date.now(),
@@ -82,8 +91,7 @@ export class SessionManager {
     };
     this.nextSessionNumber += 1;
 
-    const configuredModel = getConfiguredModel();
-    session.selectedModel = configuredModel || models[0] || "";
+    session.selectedModel = this.getPreferredModel(models);
     if (models.length) {
       session.status = `Connected — ${models.length} model${models.length > 1 ? "s" : ""} available`;
     }
@@ -93,7 +101,7 @@ export class SessionManager {
     return session;
   }
 
-  deleteSession(sessionId: string, models: string[], getConfiguredModel: () => string): string | undefined {
+  deleteSession(sessionId: string, models: string[]): string | undefined {
     const session = this.sessions.get(sessionId);
     if (!session) return undefined;
 
@@ -101,17 +109,62 @@ export class SessionManager {
     this.sessions.delete(sessionId);
 
     if (!this.sessions.size) {
-      const replacement = this.createSession(models, getConfiguredModel);
+      const replacement = this.createSession(models);
       this.sidebarSessionId = replacement.id;
     }
 
-    const fallbackId = this.getMostRecentSession()?.id ?? this.createSession(models, getConfiguredModel).id;
+    const fallbackId =
+      this.getMostRecentSession()?.id ?? this.createSession(models).id;
     if (this.sidebarSessionId === sessionId) {
       this.sidebarSessionId = fallbackId;
     }
 
     void this.saveState();
     return fallbackId;
+  }
+
+  setSessionModel(session: ChatSession, modelId: string) {
+    const nextModel = modelId.trim();
+    if (session.selectedModel === nextModel) {
+      if (nextModel) this.lastSelectedModel = nextModel;
+      return;
+    }
+
+    session.selectedModel = nextModel;
+    session.selectedReasoningEffort = "";
+    if (nextModel) this.lastSelectedModel = nextModel;
+    this.touchSession(session);
+  }
+
+  setSessionReasoningEffort(session: ChatSession, reasoningEffort: string) {
+    const nextEffort = reasoningEffort.trim();
+    if (session.selectedReasoningEffort === nextEffort) return;
+    session.selectedReasoningEffort = nextEffort;
+    this.touchSession(session);
+  }
+
+  getPreferredModel(models: string[]): string {
+    if (!models.length) return "";
+    if (this.lastSelectedModel && models.includes(this.lastSelectedModel)) {
+      return this.lastSelectedModel;
+    }
+
+    const recentMatch = this.getSessionsByRecency().find(
+      (session) => session.selectedModel && models.includes(session.selectedModel),
+    );
+    return recentMatch?.selectedModel || models[0] || "";
+  }
+
+  renameSession(sessionId: string, title: string): ChatSession | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+
+    const nextTitle = title.trim().replace(/\s+/g, " ").slice(0, 120);
+    if (!nextTitle || nextTitle === session.title) return session;
+
+    session.title = nextTitle;
+    this.touchSession(session);
+    return session;
   }
 
   forkSession(session: ChatSession, forkAtIndex?: number): ChatSession {
@@ -123,6 +176,7 @@ export class SessionManager {
       title: `${session.title} (fork)`,
       transcript: forkedTranscript,
       selectedModel: session.selectedModel,
+      selectedReasoningEffort: session.selectedReasoningEffort,
       selectedEndpoint: session.selectedEndpoint,
       status: "Forked session — ready.",
       updatedAt: Date.now(),
@@ -217,15 +271,15 @@ export class SessionManager {
   }
 
   getSessionSummaries(): SessionSummary[] {
-    return Array.from(this.sessions.values())
-      .map((s) => ({ id: s.id, title: s.title, updatedAt: s.updatedAt }))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.getSessionsByRecency().map((s) => ({
+      id: s.id,
+      title: s.title,
+      updatedAt: s.updatedAt,
+    }));
   }
 
   getMostRecentSession(): ChatSession | undefined {
-    return Array.from(this.sessions.values()).sort(
-      (a, b) => b.updatedAt - a.updatedAt,
-    )[0];
+    return this.getSessionsByRecency()[0];
   }
 
   touchSession(session: ChatSession) {
@@ -240,5 +294,11 @@ export class SessionManager {
     if (isDefaultSessionTitle(session.title)) {
       session.title = summarizePrompt(prompt, this.nextSessionNumber - 1);
     }
+  }
+
+  private getSessionsByRecency(): ChatSession[] {
+    return Array.from(this.sessions.values()).sort(
+      (a, b) => b.updatedAt - a.updatedAt,
+    );
   }
 }

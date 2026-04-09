@@ -16,6 +16,39 @@ import {
 import { generateToolCallId } from "./helpers";
 import { TOOL_DEFINITIONS } from "./tool-definitions";
 
+/**
+ * Wrapper around fetch that produces actionable error messages for network failures.
+ * Node's native "fetch failed" error is unhelpful — this adds context about what
+ * URL was being reached and common fixes.
+ */
+async function fetchWithContext(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    const cause = (err as { cause?: { code?: string } }).cause;
+    const code = cause?.code ?? "";
+    let hint: string;
+    if (code === "ECONNREFUSED") {
+      hint = `Connection refused at ${url} — is the model server running?`;
+    } else if (code === "ENOTFOUND") {
+      const host = new URL(url).hostname;
+      hint = `Could not resolve host "${host}" — check your endpoint URL in settings.`;
+    } else if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
+      hint = `Connection timed out reaching ${url} — the server may be overloaded or unreachable.`;
+    } else if ((err as Error).name === "AbortError") {
+      throw err; // re-throw cancellations as-is
+    } else {
+      hint = `Network error reaching ${url}: ${(err as Error).message ?? err}`;
+    }
+    const wrapped = new Error(hint);
+    wrapped.name = (err as Error).name ?? "FetchError";
+    throw wrapped;
+  }
+}
+
 export type StreamResult = {
   text: string;
   toolCalls: ToolCall[];
@@ -23,17 +56,42 @@ export type StreamResult = {
 
 export interface StreamingDeps {
   baseUrl: string;
+  apiKey: string;
   config: vscode.WorkspaceConfiguration;
   outputChannel: vscode.OutputChannel;
   projectInstructionsCache: string;
   getActiveSystemPrompt: () => string;
+  getActiveReasoningEffort: () => string;
   getActiveMaxTokens: () => number;
   broadcastToWebviews: (message: ExtensionToWebviewMessage) => void;
   memoryContext?: string;
 }
 
-const STRUCTURED_TOOL_INSTRUCTIONS =
-  "You have tools available for reading and modifying files, searching code, running commands, and using git. Use them by calling the appropriate function. Always read a file before editing it. For edits, the search text must match exactly and appear only once in the file.";
+const STRUCTURED_TOOL_INSTRUCTIONS = `You have tools available via function calling. Follow these rules:
+
+# Tool Selection
+- To find files by name or extension, use glob. To search file contents, use grep.
+- To read a file, use read_file — never run_command with cat/head/tail.
+- To modify a file, use edit_file — never run_command with sed/awk.
+- To create a new file, use write_file — never run_command with echo/cat redirection.
+- Use run_command only for shell operations that have no dedicated tool (builds, installs, test runners, etc.).
+- For a known file path, use read_file directly. For a known class/function name, use grep. Only use glob when you need pattern-based file discovery.
+
+# Tool Usage Rules
+- Always read a file with read_file before editing it. Never edit a file you haven't read.
+- For edit_file, the old_string must match the file content EXACTLY including whitespace. If it matches multiple locations, include more surrounding context to make it unique, or use replace_all.
+- Prefer edit_file over write_file for existing files — it only sends the diff.
+- Use write_file only for new files or complete rewrites.
+- After calling a tool, wait for its result. Do not guess or fabricate results.
+
+# Parallel Tool Calls
+- If you need to call multiple tools with no dependencies between them, call them all in the same response for efficiency.
+- If one call depends on the result of another, call them sequentially.
+
+# Self-Regulation
+- If an approach is blocked or failing, do not retry the same call repeatedly. Try a different approach or ask the user.
+- If you are unsure which file to edit or what the user wants, ask a clarifying question rather than guessing.
+- Consider the reversibility of actions. Read and search tools are safe. Edit, write, run_command, and git_commit change state — be deliberate with these.`;
 
 /**
  * Build messages for the chat API. When `useStructuredTools` is true, uses a
@@ -43,6 +101,28 @@ const STRUCTURED_TOOL_INSTRUCTIONS =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type MessageContent = string | Array<Record<string, any>>;
 type ChatMessage = { role: ChatRole; content: MessageContent };
+
+function buildCompletionRequestBody(
+  session: ChatSession,
+  messages: ChatMessage[],
+  maxTokens: number,
+  deps: StreamingDeps,
+  extras?: Record<string, unknown>,
+) {
+  const reasoningEffort =
+    session.selectedReasoningEffort.trim() ||
+    deps.getActiveReasoningEffort().trim();
+
+  return {
+    model: session.selectedModel,
+    messages,
+    temperature: 0.45,
+    top_p: 0.9,
+    max_tokens: maxTokens,
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+    ...(extras ?? {}),
+  };
+}
 
 export function buildMessages(
   session: ChatSession,
@@ -117,20 +197,17 @@ export async function streamResponse(
   for (let attempt = 0; attempt <= autoContinueLimit; attempt++) {
     deps.broadcastToWebviews({ type: "streamStart" });
 
-    const response = await fetch(`${deps.baseUrl}/v1/chat/completions`, {
+    const response = await fetchWithContext(`${deps.baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer local-pocketai",
+        Authorization: `Bearer ${deps.apiKey}`,
       },
-      body: JSON.stringify({
-        model: session.selectedModel,
-        messages,
-        temperature: 0.45,
-        top_p: 0.9,
-        max_tokens: maxTokens,
-        stream: true,
-      }),
+      body: JSON.stringify(
+        buildCompletionRequestBody(session, messages, maxTokens, deps, {
+          stream: true,
+        }),
+      ),
       signal: session.currentRequest?.signal,
     });
 
@@ -279,21 +356,18 @@ export async function streamResponseWithTools(
     ? [...baseTools, ...extraTools]
     : baseTools;
 
-  const response = await fetch(`${deps.baseUrl}/v1/chat/completions`, {
+  const response = await fetchWithContext(`${deps.baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Bearer local-pocketai",
+      Authorization: `Bearer ${deps.apiKey}`,
     },
-    body: JSON.stringify({
-      model: session.selectedModel,
-      messages,
-      temperature: 0.45,
-      top_p: 0.9,
-      max_tokens: maxTokens,
-      stream: true,
-      ...(tools ? { tools } : {}),
-    }),
+    body: JSON.stringify(
+      buildCompletionRequestBody(session, messages, maxTokens, deps, {
+        stream: true,
+        ...(tools ? { tools } : {}),
+      }),
+    ),
     signal: session.currentRequest?.signal,
   });
 
@@ -667,20 +741,17 @@ async function nonStreamingFallback(
   maxTokens: number,
   deps: StreamingDeps,
 ): Promise<string> {
-  const response = await fetch(`${deps.baseUrl}/v1/chat/completions`, {
+  const response = await fetchWithContext(`${deps.baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Bearer local-pocketai",
+      Authorization: `Bearer ${deps.apiKey}`,
     },
-    body: JSON.stringify({
-      model: session.selectedModel,
-      messages,
-      temperature: 0.45,
-      top_p: 0.9,
-      max_tokens: maxTokens,
-      stream: false,
-    }),
+    body: JSON.stringify(
+      buildCompletionRequestBody(session, messages, maxTokens, deps, {
+        stream: false,
+      }),
+    ),
     signal: session.currentRequest?.signal,
   });
   const payload = (await response.json()) as ChatCompletionResponse;

@@ -45,14 +45,14 @@ export async function handleSlashCommand(
 
     case "/model":
       if (arg && deps.endpointMgr.models.includes(arg)) {
-        session.selectedModel = arg;
+        deps.sessionMgr.setSessionModel(session, arg);
         session.status = `Model switched to ${arg}`;
       } else {
         session.status = arg
           ? `Model "${arg}" not found. Available: ${deps.endpointMgr.models.join(", ")}`
           : `Available models: ${deps.endpointMgr.models.join(", ")}`;
+        deps.sessionMgr.touchSession(session);
       }
-      deps.sessionMgr.touchSession(session);
       deps.updateStatusBar();
       await deps.sessionMgr.saveState();
       deps.postState();

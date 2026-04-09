@@ -9,6 +9,41 @@ import type {
 } from "./types";
 import { normalizeBaseUrl } from "./helpers";
 
+/**
+ * ID prefixes for non-chat models (image gen, video gen, voice/TTS/STT).
+ * These should be excluded from the chat model selector.
+ */
+const NON_CHAT_MODEL_PREFIXES = [
+  // Image generation
+  "sd-", "sdxl-", "sd3", "flux", "chroma", "z-image-", "qwen-image-", "ovis-image-",
+  // Video generation
+  "wan2",
+  // Voice / STT / TTS / VAD
+  "whisper-", "silero-", "kokoro-", "piper-",
+];
+
+/**
+ * Extract a numeric parameter size from a model ID (e.g. "qwen3.5-9b" → 9).
+ * Returns Infinity if no size is found so unknowns sort to the end.
+ */
+function extractModelSizeB(id: string): number {
+  // Match patterns like "0.8b", "2b", "14b", "122b", "397b", "80b"
+  // Also handles MoE patterns like "35b-a3b" — use the first (total) size
+  const match = id.match(/(\d+(?:\.\d+)?)b(?:-|$|[^a-z])/i);
+  return match ? parseFloat(match[1]) : Infinity;
+}
+
+/** Filter out non-chat models and sort by parameter size (smallest first). */
+function filterAndSortChatModels(models: string[]): string[] {
+  const lower = (id: string) => id.toLowerCase();
+  return models
+    .filter((id) => {
+      const lid = lower(id);
+      return !NON_CHAT_MODEL_PREFIXES.some((prefix) => lid.startsWith(prefix));
+    })
+    .sort((a, b) => extractModelSizeB(a) - extractModelSizeB(b));
+}
+
 export class EndpointManager {
   readonly endpointHealthMap = new Map<string, EndpointHealth>();
   activeEndpointUrl = "";
@@ -27,7 +62,7 @@ export class EndpointManager {
     return (
       this.activeEndpointUrl ||
       normalizeBaseUrl(
-        this.config.get<string>("baseUrl") ?? "http://127.0.0.1:11434",
+        this.config.get<string>("baseUrl") ?? "http://127.0.0.1:39457",
       )
     );
   }
@@ -36,7 +71,7 @@ export class EndpointManager {
     const endpoints = this.config.get<EndpointConfig[]>("endpoints") ?? [];
     if (endpoints.length) return endpoints;
     const legacy = (
-      this.config.get<string>("baseUrl") ?? "http://127.0.0.1:11434"
+      this.config.get<string>("baseUrl") ?? "http://127.0.0.1:39457"
     ).trim();
     return [{ name: "Local PocketAI", url: legacy }];
   }
@@ -48,7 +83,7 @@ export class EndpointManager {
     );
     return (
       match ??
-      endpoints[0] ?? { name: "Local PocketAI", url: "http://127.0.0.1:11434" }
+      endpoints[0] ?? { name: "Local PocketAI", url: "http://127.0.0.1:39457" }
     );
   }
 
@@ -70,12 +105,17 @@ export class EndpointManager {
       !this.endpointHealthMap.has(this.activeEndpointUrl)
     ) {
       this.activeEndpointUrl = normalizeBaseUrl(
-        endpoints[0]?.url ?? "http://127.0.0.1:11434",
+        endpoints[0]?.url ?? "http://127.0.0.1:39457",
       );
     }
   }
 
   startHealthChecks(postState: () => void, pushSettingsState: () => void) {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = undefined;
+    }
+
     const check = async () => {
       const endpoints = this.getEndpoints();
       const currentUrls = new Set<string>();
@@ -95,24 +135,45 @@ export class EndpointManager {
         if (!currentUrls.has(url)) this.endpointHealthMap.delete(url);
       }
 
+      let changed = false;
       for (const health of this.endpointHealthMap.values()) {
+        const ep = endpoints.find((e) => normalizeBaseUrl(e.url) === health.url);
+        const apiKey = ep?.apiKey || "local-pocketai";
+        const prevHealthy = health.healthy;
         const start = Date.now();
         try {
           const resp = await fetch(`${health.url}/v1/models`, {
-            headers: { Authorization: "Bearer local-pocketai" },
+            headers: { Authorization: `Bearer ${apiKey}` },
             signal: AbortSignal.timeout(5000),
           });
           health.healthy = resp.ok;
           health.latencyMs = Date.now() - start;
-        } catch {
+          health.error = resp.ok ? undefined : `HTTP ${resp.status}`;
+        } catch (err) {
           health.healthy = false;
           health.latencyMs = undefined;
+          const cause = (err as { cause?: { code?: string } }).cause;
+          const code = cause?.code ?? "";
+          if (code === "ECONNREFUSED") {
+            health.error = "Connection refused — server not running";
+          } else if (code === "ENOTFOUND") {
+            health.error = "Host not found — check endpoint URL";
+          } else if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
+            health.error = "Connection timed out";
+          } else {
+            health.error = (err as Error).message ?? "Unknown error";
+          }
         }
         health.lastChecked = Date.now();
+        if (health.healthy !== prevHealthy) changed = true;
       }
       this.updateStatusBar();
-      postState();
-      pushSettingsState();
+      // Only push state to webviews when health status actually changes,
+      // to avoid unnecessary full re-renders that cause visible blinking.
+      if (changed) {
+        postState();
+        pushSettingsState();
+      }
     };
     void check();
     this.healthCheckTimer = setInterval(() => void check(), 30000);
@@ -121,14 +182,16 @@ export class EndpointManager {
   async refreshModels(
     sessions: Map<string, ChatSession>,
     saveState: () => Promise<void>,
+    getPreferredModel: (models: string[]) => string,
   ) {
     try {
       this.statusSummary = "checking...";
+      const activeApiKey = this.getActiveEndpointConfig().apiKey || "local-pocketai";
       let foundModels: string[] = [];
 
       try {
         const response = await fetch(`${this.baseUrl}/v1/models`, {
-          headers: { Authorization: "Bearer local-pocketai" },
+          headers: { Authorization: `Bearer ${activeApiKey}` },
         });
         const payload = (await response.json()) as ModelListResponse;
         foundModels = Array.from(
@@ -160,7 +223,7 @@ export class EndpointManager {
       if (!foundModels.length) {
         try {
           const sr = await fetch(`${this.baseUrl}/status`, {
-            headers: { Authorization: "Bearer local-pocketai" },
+            headers: { Authorization: `Bearer ${activeApiKey}` },
           });
           const sp = (await sr.json()) as StatusResponse;
           this.statusSummary = JSON.stringify(sp);
@@ -170,7 +233,7 @@ export class EndpointManager {
         } catch {}
       }
 
-      this.models = foundModels;
+      this.models = filterAndSortChatModels(foundModels);
 
       const activeHealth = this.endpointHealthMap.get(this.activeEndpointUrl);
       if (activeHealth) {
@@ -178,16 +241,14 @@ export class EndpointManager {
         activeHealth.lastChecked = Date.now();
       }
 
-      const fallbackModel =
-        (this.getActiveEndpointConfig().model ?? "").trim() ||
-        this.models[0] ||
-        "";
+      const fallbackModel = getPreferredModel(this.models) || this.models[0] || "";
       for (const session of sessions.values()) {
         if (
           !session.selectedModel ||
           !this.models.includes(session.selectedModel)
         ) {
           session.selectedModel = fallbackModel;
+          session.selectedReasoningEffort = "";
         }
         session.status = this.models.length
           ? `Connected — ${this.models.length} model${this.models.length > 1 ? "s" : ""} available`
@@ -273,7 +334,14 @@ export class EndpointManager {
     const tokenInfo = cumTokens
       ? `\nTokens used: ${cumTokens.prompt + cumTokens.completion}`
       : "";
-    this.statusBarItem.tooltip = `PocketAI: ${endpointName}\nModel: ${model}\nMode: ${mode}\nStatus: ${busy ? session?.status || "Busy" : health?.healthy ? "Connected" : "Disconnected"}${tokenInfo}`;
+    const connectionStatus = busy
+      ? (session?.status || "Busy")
+      : health?.healthy
+        ? "Connected"
+        : health?.error
+          ? `Disconnected — ${health.error}`
+          : "Disconnected";
+    this.statusBarItem.tooltip = `PocketAI: ${endpointName}\nModel: ${model}\nMode: ${mode}\nStatus: ${connectionStatus}${tokenInfo}`;
   }
 
   dispose() {

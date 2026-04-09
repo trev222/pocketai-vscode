@@ -73,8 +73,10 @@ export type EndpointConfig = {
   name: string;
   url: string;
   model?: string;
+  reasoningEffort?: string;
   maxTokens?: number;
   systemPrompt?: string;
+  apiKey?: string;
 };
 
 export type EndpointHealth = {
@@ -83,6 +85,7 @@ export type EndpointHealth = {
   healthy: boolean;
   latencyMs?: number;
   lastChecked: number;
+  error?: string;
 };
 
 export type ImageAttachment = {
@@ -103,6 +106,7 @@ export type ChatSession = {
   title: string;
   transcript: ChatEntry[];
   selectedModel: string;
+  selectedReasoningEffort: string;
   selectedEndpoint: string;
   status: string;
   updatedAt: number;
@@ -149,6 +153,7 @@ export type PersistedState = {
   sessions: PersistedChatSession[];
   sidebarSessionId: string;
   nextSessionNumber: number;
+  lastSelectedModel?: string;
 };
 
 export type ModelListResponse = {
@@ -177,12 +182,14 @@ export type WebviewToExtensionMessage =
   | { type: "ready" }
   | { type: "sendPrompt"; prompt: string; images?: ImageAttachment[] }
   | { type: "selectModel"; modelId: string }
+  | { type: "selectReasoningEffort"; reasoningEffort: string }
   | { type: "selectEndpoint"; endpointUrl: string }
   | { type: "refreshModels" }
   | { type: "useSelection" }
   | { type: "clear" }
   | { type: "newSession" }
   | { type: "switchSession"; sessionId: string }
+  | { type: "renameSession"; sessionId: string; title: string }
   | { type: "deleteSession"; sessionId: string }
   | { type: "setMode"; mode: InteractionMode }
   | { type: "approveToolCall"; toolCallId: string }
@@ -205,6 +212,9 @@ export type ExtensionToWebviewMessage = {
   transcript: ChatEntry[];
   models: string[];
   selectedModel: string;
+  selectedReasoningEffort: string;
+  showReasoningControl: boolean;
+  reasoningOptions: string[];
   endpoints: EndpointHealth[];
   selectedEndpoint: string;
   status: string;

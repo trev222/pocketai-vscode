@@ -34,9 +34,11 @@ export interface MessageHandlerDeps {
     approved: boolean,
   ) => Promise<void>;
   refreshModels: () => Promise<void>;
+  selectEndpoint: (endpointUrl: string) => Promise<void>;
   postState: () => void;
   postStateToWebview: (webview: vscode.Webview, sessionId: string) => void;
   openForkedPanel: (forked: ReturnType<SessionManager["forkSession"]>) => void;
+  renameSession: (sessionId: string, title: string) => Promise<void>;
 }
 
 /**
@@ -67,8 +69,19 @@ export function setupChatMessageHandler(
         case "selectModel": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
-          session.selectedModel = message.modelId;
-          deps.sessionMgr.touchSession(session);
+          deps.sessionMgr.setSessionModel(session, message.modelId);
+          await deps.sessionMgr.saveState();
+          deps.postState();
+          return;
+        }
+
+        case "selectReasoningEffort": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session) return;
+          deps.sessionMgr.setSessionReasoningEffort(
+            session,
+            message.reasoningEffort,
+          );
           await deps.sessionMgr.saveState();
           deps.postState();
           return;
@@ -100,6 +113,10 @@ export function setupChatMessageHandler(
 
         case "switchSession":
           switchSession(message.sessionId);
+          return;
+
+        case "renameSession":
+          await deps.renameSession(message.sessionId, message.title);
           return;
 
         case "deleteSession":
@@ -146,8 +163,7 @@ export function setupChatMessageHandler(
         }
 
         case "selectEndpoint":
-          deps.endpointMgr.switchEndpoint(message.endpointUrl);
-          void deps.refreshModels();
+          await deps.selectEndpoint(message.endpointUrl);
           return;
 
         case "exportSession": {

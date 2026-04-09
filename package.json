@@ -112,22 +112,24 @@
       "properties": {
         "pocketai.endpoints": {
           "type": "array",
-          "default": [{ "name": "Local PocketAI", "url": "http://127.0.0.1:11434", "model": "", "maxTokens": 4096, "systemPrompt": "You are a concise coding assistant inside VS Code." }],
+          "default": [{ "name": "Local PocketAI", "url": "http://127.0.0.1:39457", "model": "", "maxTokens": 4096, "systemPrompt": "You are a concise coding assistant inside VS Code." }],
           "items": {
             "type": "object",
             "properties": {
               "name": { "type": "string", "description": "Display name for this endpoint." },
               "url": { "type": "string", "description": "Base URL for the PocketAI server." },
               "model": { "type": "string", "default": "", "description": "Model ID to use with this endpoint. Leave empty to auto-detect." },
+              "reasoningEffort": { "type": "string", "default": "", "description": "Optional reasoning effort for endpoints that support it, such as the Codex Bridge." },
               "maxTokens": { "type": "number", "default": 4096, "minimum": 128, "description": "Maximum completion tokens per reply for this endpoint." },
-              "systemPrompt": { "type": "string", "default": "You are a concise coding assistant inside VS Code.", "description": "System prompt for this endpoint." }
+              "systemPrompt": { "type": "string", "default": "You are a concise coding assistant inside VS Code.", "description": "System prompt for this endpoint." },
+              "apiKey": { "type": "string", "default": "", "description": "API key / bearer token for this endpoint. Leave empty for unauthenticated local servers." }
             }
           },
           "description": "List of PocketAI server endpoints with per-endpoint model, token, and prompt settings."
         },
         "pocketai.baseUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:11434",
+          "default": "http://127.0.0.1:39457",
           "description": "(Deprecated — use pocketai.endpoints instead) Base URL for the local PocketAI desktop app.",
           "deprecationMessage": "Use pocketai.endpoints instead."
         },
@@ -185,8 +187,8 @@
         },
         "pocketai.useStructuredTools": {
           "type": "boolean",
-          "default": false,
-          "description": "Use OpenAI-compatible structured function calling instead of text-based tool parsing. Enable this if your model supports function calling (e.g. recent Ollama models with tool support)."
+          "default": true,
+          "description": "Use OpenAI-compatible structured function calling instead of text-based tool parsing. Disable this if your model does not support function calling."
         },
         "pocketai.includeGitContext": {
           "type": "boolean",
@@ -251,6 +253,7 @@
     }
   },
   "scripts": {
+    "codex-bridge": "node ./scripts/codex-openai-bridge.mjs",
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },

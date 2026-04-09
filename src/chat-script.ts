@@ -12,11 +12,15 @@ export function getChatScript(brandIconUri: string): string {
     const sessionTrigger = document.getElementById("sessionTrigger");
     const sessionMenu = document.getElementById("sessionMenu");
     const sessionList = document.getElementById("sessionList");
+    const sessionTitleBtn = document.getElementById("sessionTitleBtn");
+    const sessionTitleInput = document.getElementById("sessionTitleInput");
     const sessionLabel = document.getElementById("sessionLabel");
     const newSessionBtn = document.getElementById("newSessionBtn");
     const inputWrap = document.getElementById("inputWrap");
     const resourceWarningsEl = document.getElementById("resourceWarnings");
     const endpointSelect = document.getElementById("endpointSelect");
+    const modelSelect = document.getElementById("modelSelect");
+    const reasoningSelect = document.getElementById("reasoningSelect");
     const exportBtn = document.getElementById("exportBtn");
     const sessionSearch = document.getElementById("sessionSearch");
     const sessionSearchWrap = document.getElementById("sessionSearchWrap");
@@ -31,6 +35,8 @@ export function getChatScript(brandIconUri: string): string {
     let streamStartTime = 0;
     let streamChunkCount = 0;
     const messageStats = new Map();
+    let editingSessionId = "";
+    let isEditingSessionTitle = false;
 
     /* ── Markdown renderer ── */
     function escapeHtml(s) {
@@ -275,8 +281,17 @@ export function getChatScript(brandIconUri: string): string {
     });
 
     /* ── Render functions ── */
+    /** Build a fingerprint string for a transcript entry so we can detect changes. */
+    function msgFingerprint(entry, idx) {
+      const tcPart = entry.toolCalls
+        ? entry.toolCalls.map(t => t.id + ":" + t.status + ":" + (t.result || "").length).join(",")
+        : "";
+      return entry.role + ":" + idx + ":" + (entry.content || "").length + ":" + tcPart;
+    }
+
+    let prevFingerprints = [];
+
     function renderMessages(payload) {
-      messagesEl.innerHTML = "";
       const items = payload.transcript || [];
 
       if (!items.length && !isStreaming) {
@@ -293,15 +308,54 @@ export function getChatScript(brandIconUri: string): string {
             "\\nModels: " + ((payload.diagnostics.detectedModelIds || []).join(", ") || "none detected") +
             "\\nRAM: " + (payload.diagnostics.freeMemoryGB || "?") + " GB free / " + (payload.diagnostics.totalMemoryGB || "?") + " GB total";
         }
+        prevFingerprints = [];
         return;
       }
 
+      // Build new fingerprints and compare with previous render
+      const newFingerprints = [];
+      const visibleItems = [];
       for (let i = 0; i < items.length; i++) {
         if (items[i].role === "system") continue;
-        appendMessage(items[i], i);
+        newFingerprints.push(msgFingerprint(items[i], i));
+        visibleItems.push({ entry: items[i], idx: i });
       }
 
-      scrollToBottom();
+      // Fast path: if nothing changed, skip the entire render
+      if (
+        newFingerprints.length === prevFingerprints.length &&
+        newFingerprints.every((fp, j) => fp === prevFingerprints[j])
+      ) {
+        return;
+      }
+
+      // Find the first index that differs
+      let firstDiff = 0;
+      while (
+        firstDiff < prevFingerprints.length &&
+        firstDiff < newFingerprints.length &&
+        prevFingerprints[firstDiff] === newFingerprints[firstDiff]
+      ) {
+        firstDiff++;
+      }
+
+      // Remove stale DOM nodes from firstDiff onward
+      const existingMsgNodes = messagesEl.querySelectorAll(":scope > .msg");
+      for (let j = existingMsgNodes.length - 1; j >= firstDiff; j--) {
+        existingMsgNodes[j].remove();
+      }
+
+      // Append new/changed messages from firstDiff onward
+      for (let j = firstDiff; j < visibleItems.length; j++) {
+        appendMessage(visibleItems[j].entry, visibleItems[j].idx);
+      }
+
+      prevFingerprints = newFingerprints;
+
+      // Only scroll if new messages were added at the end
+      if (visibleItems.length > firstDiff) {
+        scrollToBottom();
+      }
     }
 
     function appendMessage(entry, msgIndex) {
@@ -309,10 +363,12 @@ export function getChatScript(brandIconUri: string): string {
       const roleClass = entry.role === "user" ? "msg-user" : entry.role === "tool" ? "msg-tool" : "msg-assistant";
       div.className = "msg " + roleClass;
 
-      const label = document.createElement("div");
-      label.className = "msg-label";
-      label.textContent = entry.role === "user" ? "You" : entry.role === "tool" ? "Tool Result" : "PocketAI";
-      div.appendChild(label);
+      if (entry.role === "tool") {
+        const label = document.createElement("div");
+        label.className = "msg-label";
+        label.textContent = "Tool Result";
+        div.appendChild(label);
+      }
 
       const body = document.createElement("div");
       body.className = "msg-body";
@@ -336,6 +392,7 @@ export function getChatScript(brandIconUri: string): string {
 
       if (entry.role === "assistant" && messageStats.has(msgIndex)) {
         const stats = messageStats.get(msgIndex);
+        div.classList.add("msg-has-stats");
         const statsEl = document.createElement("div");
         statsEl.className = "msg-stats";
         const tps = stats.tokPerSec > 0 ? stats.tokPerSec.toFixed(1) + " tok/s" : "";
@@ -434,18 +491,7 @@ export function getChatScript(brandIconUri: string): string {
         }
       }
 
-      if (entry.role === "assistant" || entry.role === "user") {
-        const actions = document.createElement("div");
-        actions.className = "msg-actions";
-
-        const forkBtn = document.createElement("button");
-        forkBtn.className = "msg-action-btn";
-        forkBtn.textContent = "\\u2442 Fork from here";
-        forkBtn.onclick = () => vscode.postMessage({ type: "forkFromMessage", messageIndex: msgIndex + 1 });
-        actions.appendChild(forkBtn);
-
-        div.appendChild(actions);
-      }
+      // Fork feature hidden for now — will be re-introduced via right-click context menu
 
       messagesEl.appendChild(div);
     }
@@ -630,23 +676,76 @@ export function getChatScript(brandIconUri: string): string {
     }
 
     /* ── Session menu ── */
+    function getActiveSession() {
+      if (!state?.sessions?.length) return null;
+      return state.sessions.find(s => s.id === state.activeSessionId) || null;
+    }
+
+    function syncSessionTitle() {
+      const activeSession = getActiveSession();
+      const title = activeSession ? activeSession.title : "Chat";
+      sessionLabel.textContent = title;
+      if (!isEditingSessionTitle || editingSessionId !== activeSession?.id) {
+        sessionTitleInput.value = title;
+      }
+    }
+
+    function startSessionTitleEdit() {
+      const activeSession = getActiveSession();
+      if (!activeSession) return;
+      isEditingSessionTitle = true;
+      editingSessionId = activeSession.id;
+      sessionTitleBtn.classList.add("hidden");
+      sessionTitleInput.classList.add("editing");
+      sessionTitleInput.value = activeSession.title;
+      sessionTitleInput.focus();
+      sessionTitleInput.select();
+    }
+
+    function finishSessionTitleEdit(commit) {
+      if (!isEditingSessionTitle) return;
+
+      const activeSession = getActiveSession();
+      const previousTitle =
+        (state?.sessions || []).find(s => s.id === editingSessionId)?.title ||
+        sessionLabel.textContent ||
+        "Chat";
+      const nextTitle = sessionTitleInput.value.trim().replace(/\\s+/g, " ");
+      const targetSessionId = editingSessionId;
+
+      isEditingSessionTitle = false;
+      editingSessionId = "";
+      sessionTitleBtn.classList.remove("hidden");
+      sessionTitleInput.classList.remove("editing");
+
+      if (!commit || !targetSessionId || !nextTitle || nextTitle === previousTitle) {
+        sessionTitleInput.value = activeSession ? activeSession.title : previousTitle;
+        return;
+      }
+
+      sessionLabel.textContent = nextTitle;
+      sessionTitleInput.value = nextTitle;
+      vscode.postMessage({ type: "renameSession", sessionId: targetSessionId, title: nextTitle });
+    }
+
     function renderSessions(payload) {
       sessionList.innerHTML = "";
       const active = payload.activeSessionId;
-      const activeSession = (payload.sessions || []).find(s => s.id === active);
-      sessionLabel.textContent = activeSession ? activeSession.title : "Chat";
+      syncSessionTitle();
 
       for (const s of payload.sessions || []) {
         const item = document.createElement("div");
         item.className = "session-menu-item" + (s.id === active ? " active" : "");
+        item.onclick = () => {
+          vscode.postMessage({ type: "switchSession", sessionId: s.id });
+          sessionMenu.classList.remove("open");
+          sessionSearchWrap.style.display = "none";
+          sessionSearch.value = "";
+        };
 
         const titleEl = document.createElement("span");
         titleEl.className = "title";
         titleEl.textContent = s.title;
-        titleEl.onclick = () => {
-          vscode.postMessage({ type: "switchSession", sessionId: s.id });
-          sessionMenu.classList.remove("open");
-        };
         item.appendChild(titleEl);
 
         const delBtn = document.createElement("button");
@@ -663,8 +762,20 @@ export function getChatScript(brandIconUri: string): string {
     }
 
     /* ── State handler ── */
+    let lastRenderedSessionId = "";
+
     function handleState(payload) {
       state = payload;
+
+      // Reset message cache when switching sessions so we do a full re-render
+      if (payload.activeSessionId && payload.activeSessionId !== lastRenderedSessionId) {
+        prevFingerprints = [];
+        messagesEl.innerHTML = "";
+        if (isEditingSessionTitle && editingSessionId !== payload.activeSessionId) {
+          finishSessionTitleEdit(false);
+        }
+        lastRenderedSessionId = payload.activeSessionId;
+      }
 
       if (messageStats.has("__pending__") && payload.transcript) {
         for (let i = payload.transcript.length - 1; i >= 0; i--) {
@@ -714,6 +825,8 @@ export function getChatScript(brandIconUri: string): string {
         if (ep.url === payload.selectedEndpoint) opt.selected = true;
         endpointSelect.appendChild(opt);
       }
+      renderModelSelect(payload);
+      renderReasoningSelect(payload);
 
       const projectBadge = document.getElementById("projectBadge");
       if (projectBadge) {
@@ -742,6 +855,71 @@ export function getChatScript(brandIconUri: string): string {
     function formatTokens(n) {
       if (n < 1000) return n + "";
       return (n / 1000).toFixed(1) + "k";
+    }
+
+    function renderModelSelect(payload) {
+      const models = Array.isArray(payload.models) ? payload.models : [];
+      const selectedModel = payload.selectedModel || "";
+
+      modelSelect.innerHTML = "";
+
+      if (selectedModel && !models.includes(selectedModel)) {
+        const unavailableOpt = document.createElement("option");
+        unavailableOpt.value = selectedModel;
+        unavailableOpt.textContent = selectedModel + " (unavailable)";
+        unavailableOpt.selected = true;
+        modelSelect.appendChild(unavailableOpt);
+      }
+
+      for (const modelId of models) {
+        const opt = document.createElement("option");
+        opt.value = modelId;
+        opt.textContent = modelId;
+        if (modelId === selectedModel) opt.selected = true;
+        modelSelect.appendChild(opt);
+      }
+
+      if (!modelSelect.options.length) {
+        const emptyOpt = document.createElement("option");
+        emptyOpt.value = "";
+        emptyOpt.textContent = "No models available";
+        emptyOpt.selected = true;
+        modelSelect.appendChild(emptyOpt);
+      }
+
+      if (models.length && !selectedModel) {
+        modelSelect.value = models[0];
+      }
+
+      modelSelect.disabled = !!payload.busy || models.length === 0;
+    }
+
+    function renderReasoningSelect(payload) {
+      const showControl = !!payload.showReasoningControl;
+      const options = Array.isArray(payload.reasoningOptions) ? payload.reasoningOptions : [];
+      const selectedReasoningEffort = payload.selectedReasoningEffort || "";
+
+      reasoningSelect.style.display = showControl ? "" : "none";
+      reasoningSelect.innerHTML = "";
+
+      if (!showControl) return;
+
+      const autoOpt = document.createElement("option");
+      autoOpt.value = "";
+      autoOpt.textContent = "Reasoning: Auto";
+      autoOpt.selected = selectedReasoningEffort === "";
+      reasoningSelect.appendChild(autoOpt);
+
+      for (const option of options) {
+        const opt = document.createElement("option");
+        opt.value = option;
+        opt.textContent =
+          "Reasoning: " + option.charAt(0).toUpperCase() + option.slice(1);
+        if (option === selectedReasoningEffort) opt.selected = true;
+        reasoningSelect.appendChild(opt);
+      }
+
+      reasoningSelect.disabled = !!payload.busy || options.length === 0;
     }
 
     function renderResourceWarnings(payload) {
@@ -926,6 +1104,24 @@ export function getChatScript(brandIconUri: string): string {
       if (isOpen) sessionSearch.focus();
     });
 
+    sessionTitleBtn.addEventListener("click", () => {
+      startSessionTitleEdit();
+    });
+
+    sessionTitleInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        finishSessionTitleEdit(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        finishSessionTitleEdit(false);
+      }
+    });
+
+    sessionTitleInput.addEventListener("blur", () => {
+      finishSessionTitleEdit(true);
+    });
+
     newSessionBtn.addEventListener("click", () => {
       vscode.postMessage({ type: "newSession" });
       sessionMenu.classList.remove("open");
@@ -943,6 +1139,18 @@ export function getChatScript(brandIconUri: string): string {
       vscode.postMessage({ type: "selectEndpoint", endpointUrl: endpointSelect.value });
     });
 
+    modelSelect.addEventListener("change", () => {
+      if (!modelSelect.value) return;
+      vscode.postMessage({ type: "selectModel", modelId: modelSelect.value });
+    });
+
+    reasoningSelect.addEventListener("change", () => {
+      vscode.postMessage({
+        type: "selectReasoningEffort",
+        reasoningEffort: reasoningSelect.value,
+      });
+    });
+
     exportBtn.addEventListener("click", () => {
       vscode.postMessage({ type: "exportSession" });
     });
@@ -957,15 +1165,15 @@ export function getChatScript(brandIconUri: string): string {
       for (const s of sessions) {
         const item = document.createElement("div");
         item.className = "session-menu-item" + (s.id === active ? " active" : "");
-        const titleEl = document.createElement("span");
-        titleEl.className = "title";
-        titleEl.textContent = s.title;
-        titleEl.onclick = () => {
+        item.onclick = () => {
           vscode.postMessage({ type: "switchSession", sessionId: s.id });
           sessionMenu.classList.remove("open");
           sessionSearchWrap.style.display = "none";
           sessionSearch.value = "";
         };
+        const titleEl = document.createElement("span");
+        titleEl.className = "title";
+        titleEl.textContent = s.title;
         item.appendChild(titleEl);
         const delBtn = document.createElement("button");
         delBtn.className = "delete-btn";

@@ -26,7 +26,37 @@
 3. **Open** PocketAI with `Cmd+L` (or `Ctrl+L` on Windows/Linux)
 4. **Chat** — ask it to read, edit, refactor, debug, or explain your code
 
-PocketAI connects to `http://127.0.0.1:11434` by default (Ollama's default port). Add additional endpoints in settings.
+PocketAI connects to `http://127.0.0.1:39457` by default. Add additional endpoints in settings.
+
+## Using Codex CLI
+
+PocketAI now includes a built-in **Connect to Codex** section in the settings sidebar.
+
+1. Open the PocketAI sidebar
+2. In the settings view, click **Connect to Codex**
+3. If you are not signed in yet, PocketAI opens a VS Code terminal and runs `codex login` for you
+4. When sign-in completes, PocketAI refreshes the Codex endpoint automatically
+
+What this setup does for you:
+
+- Adds a `Codex Bridge` endpoint at `http://127.0.0.1:39458`
+- Starts the local compatibility bridge automatically
+- Switches PocketAI to that endpoint for chat
+- Keeps Codex chat-first without changing tool behavior for your other endpoints
+
+Manual fallback:
+
+```bash
+codex login
+npm run codex-bridge
+```
+
+Notes:
+
+- `apiKey` is ignored by the bridge. Authentication comes from your local `codex login` session.
+- The current bridge maps text and image prompts only. PocketAI's structured tool-calling UI is not translated to Codex app-server approvals or inline file diffs yet, so Codex-backed sessions work best for chat, planning, debugging, and code explanation.
+- PocketAI may still send `temperature`, `top_p`, and `max_tokens`, but Codex app-server does not expose Chat Completions-style tuning controls, so those values are not forwarded 1:1.
+- If you want Codex to use a different workspace root, you can still launch the bridge manually with `CODEX_BRIDGE_CWD=/path/to/project npm run codex-bridge`.
 
 ## Features
 
@@ -85,7 +115,7 @@ All settings live under `pocketai.*` in VS Code settings.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `pocketai.endpoints` | Local Ollama | List of OpenAI-compatible API endpoints with per-endpoint model, token limit, and system prompt |
-| `pocketai.useStructuredTools` | `false` | Use OpenAI function calling instead of text-based tool parsing (enable if your model supports it) |
+| `pocketai.useStructuredTools` | `true` | Use OpenAI function calling instead of text-based tool parsing (disable if your model does not support it) |
 | `pocketai.contextWindowSize` | `8192` | Your model's context window size — used by the token meter and auto-compaction |
 
 ### Behavior

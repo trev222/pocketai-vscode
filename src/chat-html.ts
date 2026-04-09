@@ -20,12 +20,18 @@ export function getChatHtml(nonce: string, cspSource: string, brandIconUri: stri
       <div class="header-left">
         <div class="header-brand">
           <img src="${brandIconUri}" alt="" />
-          <span>PocketAI</span>
+        </div>
+        <div class="session-title-wrap">
+          <button class="session-title-btn" id="sessionTitleBtn" type="button" title="Rename chat">
+            <span id="sessionLabel">Chat 1</span>
+          </button>
+          <input class="session-title-input" id="sessionTitleInput" type="text" value="Chat 1" maxlength="120" aria-label="Chat title" />
         </div>
         <div class="session-dropdown">
           <button class="session-trigger" id="sessionTrigger" type="button">
-            <span id="sessionLabel">Chat 1</span>
-            <span style="font-size:9px">▾</span>
+            <span class="history-icon">◷</span>
+            <span>History</span>
+            <span class="history-caret">▾</span>
           </button>
           <div class="session-menu" id="sessionMenu">
             <button class="session-new-btn" id="newSessionBtn" type="button">+ New Chat</button>
@@ -78,7 +84,11 @@ export function getChatHtml(nonce: string, cspSource: string, brandIconUri: stri
             <button class="mode-btn" data-mode="plan" title="Plan changes without applying">Plan</button>
           </div>
         </div>
-        <div class="status-text" id="statusText"></div>
+        <div class="composer-right">
+          <select class="chat-model-select" id="modelSelect" title="Model for this chat"></select>
+          <select class="chat-reasoning-select" id="reasoningSelect" title="Reasoning for this chat" style="display:none"></select>
+          <div class="status-text" id="statusText"></div>
+        </div>
       </div>
     </div>
 

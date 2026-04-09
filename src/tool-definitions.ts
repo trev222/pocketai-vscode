@@ -25,7 +25,9 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
         "Reads a file from the workspace. Returns contents with line numbers (cat -n format). " +
         "By default reads up to 2000 lines. Use offset/limit for large files. " +
         "Lines longer than 2000 characters are truncated. " +
-        "Always read a file before editing it.",
+        "Always read a file before editing it. " +
+        "Use this instead of run_command with cat, head, or tail. " +
+        "If you need to find a file first, use glob or grep — not this tool with a guessed path.",
       parameters: {
         type: "object",
         properties: {
@@ -58,11 +60,12 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
       name: "edit_file",
       description:
         "Performs exact string replacements in files. " +
-        "The old_string must match the file content EXACTLY including whitespace and indentation. " +
-        "The edit will FAIL if old_string is not unique in the file — include more surrounding context to make it unique. " +
+        "The old_string must match the file content EXACTLY including whitespace and indentation — copy it from the read_file output, preserving everything after the line number prefix. " +
+        "The edit will FAIL if old_string is not unique in the file — provide a larger string with more surrounding context to make it unique. " +
         "Use replace_all to change every occurrence (e.g. renaming a variable). " +
-        "You MUST read a file before editing it. " +
-        "Prefer editing existing files over creating new ones.",
+        "You MUST read a file with read_file before editing it. " +
+        "Prefer editing existing files over creating new ones. " +
+        "Use this instead of run_command with sed or awk.",
       parameters: {
         type: "object",
         properties: {
@@ -101,7 +104,9 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
         "If this is an existing file, you MUST use read_file first. " +
         "Prefer edit_file for modifying existing files — it only sends the diff. " +
         "Only use this tool to create new files or for complete rewrites. " +
-        "Creates parent directories automatically.",
+        "Creates parent directories automatically. " +
+        "Do not create documentation files (*.md, README) unless the user explicitly asks. " +
+        "Do not create files unless they are necessary for the task.",
       parameters: {
         type: "object",
         properties: {
@@ -129,7 +134,9 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
       description:
         'Fast file pattern matching. Supports glob patterns like "**/*.ts" or "src/**/*.tsx". ' +
         "Returns matching file paths sorted by modification time. " +
-        "Use this when you need to find files by name or extension.",
+        "Use this when you need to find files by name, extension, or path pattern. " +
+        "For searching file contents, use grep instead. " +
+        "For a known specific file path, use read_file directly instead.",
       parameters: {
         type: "object",
         properties: {
@@ -158,10 +165,12 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
       description:
         "Search file contents across the workspace using regex. " +
         'Supports full regex syntax (e.g. "log.*Error", "function\\\\s+\\\\w+"). ' +
-        "Output modes: \"content\" shows matching lines with context, " +
-        '"files_with_matches" shows only file paths (default), ' +
-        '"count" shows match counts per file. ' +
-        "Use glob parameter to filter files (e.g. \"*.ts\").",
+        "Output modes: \"files_with_matches\" (default) returns file paths — use when you just need to locate files. " +
+        '"content" returns matching lines with optional context — use when you need to see the actual code. ' +
+        '"count" returns match counts per file — use when you need to gauge frequency. ' +
+        "Use glob parameter to filter files (e.g. \"*.ts\"). " +
+        "Use this for searching content. For finding files by name/extension, use glob instead. " +
+        "Do not use run_command with grep or rg — use this tool.",
       parameters: {
         type: "object",
         properties: {
@@ -234,10 +243,12 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
       name: "run_command",
       description:
         "Executes a shell command in the workspace root and returns its output. " +
-        "Use this for system commands and terminal operations that require shell execution. " +
-        "Do NOT use this to read files (use read_file), search files (use grep/glob), or edit files (use edit_file). " +
-        "Requires user approval. You can specify a timeout up to 600000ms (10 minutes). " +
-        "Use background mode for long-running processes.",
+        "Use ONLY for operations that have no dedicated tool: builds, installs, test runners, linters, package managers, etc. " +
+        "Do NOT use for: reading files (use read_file), searching files (use grep/glob), editing files (use edit_file), writing files (use write_file), or git status/diff (use git_status/git_diff). " +
+        "Requires user approval unless in auto mode. " +
+        "Timeout: up to 600000ms (10 minutes), default 120000ms (2 minutes). " +
+        "Use background mode for long-running processes (dev servers, watchers). " +
+        "Provide a description so the user understands what the command does before approving.",
       parameters: {
         type: "object",
         properties: {
@@ -275,7 +286,9 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
       name: "list_files",
       description:
         "List the contents of a directory with file sizes. " +
-        "For finding files by pattern, prefer glob instead.",
+        "For finding files by name pattern, use glob instead. " +
+        "For searching file contents, use grep instead. " +
+        "Use this when you need to see the immediate contents of a specific directory.",
       parameters: {
         type: "object",
         properties: {
@@ -372,7 +385,8 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
       description:
         "Stage modified files and create a git commit. Requires user approval. " +
         "Only commit files that were modified during this session. " +
-        "Never skip hooks or force push.",
+        "Write a concise commit message that focuses on the 'why' rather than the 'what'. " +
+        "Never skip hooks or force push. Prefer new commits over amending existing ones.",
       parameters: {
         type: "object",
         properties: {

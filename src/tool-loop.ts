@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import type { ChatSession, ToolCall } from "./types";
-import { parseToolCalls, stripFabricatedResults } from "./helpers";
+import { normalizeBaseUrl, parseToolCalls, stripFabricatedResults } from "./helpers";
 import { executeToolCallWithHooks } from "./tool-executor";
 import {
   streamResponse,
@@ -13,6 +13,7 @@ import type { McpManager } from "./mcp-client";
 import type { InlineDiffManager } from "./inline-diff";
 import type { TerminalManager } from "./terminal-manager";
 import type { MemoryManager } from "./memory-manager";
+import { CODEX_BRIDGE_URL } from "./codex-bridge-manager";
 
 export interface ToolLoopDeps {
   config: vscode.WorkspaceConfiguration;
@@ -47,7 +48,11 @@ export async function runToolLoop(
   const previousToolKeys = new Set<string>();
   const fileReadCounts = new Map<string, number>();
   const consecutiveErrors = { count: 0, maxRetries: 3 };
-  const useStructured = deps.config.get<boolean>("useStructuredTools", false);
+  const useStructuredSetting = deps.config.get<boolean>("useStructuredTools", true);
+  const isCodexBridge =
+    normalizeBaseUrl(deps.streamingDeps.baseUrl) ===
+    normalizeBaseUrl(CODEX_BRIDGE_URL);
+  const useStructured = useStructuredSetting && !isCodexBridge;
 
   // Auto-compact before starting the loop
   if (deps.autoCompact) {
