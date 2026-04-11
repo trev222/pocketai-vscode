@@ -186,6 +186,24 @@ export function parseToolCalls(text: string): ToolCall[] {
     });
   }
 
+  // apply_code_action
+  const applyCodeActionRegex = /@apply_code_action:\s*(\S+)(.*?)(?:\n|$)/g;
+  while ((match = applyCodeActionRegex.exec(text)) !== null) {
+    const rest = match[2] || "";
+    const lineMatch = rest.match(/--line\s+(\d+)/);
+    const charMatch = rest.match(/--char(?:acter)?\s+(\d+)/);
+    const titleMatch = rest.match(/--title\s+(.+)$/);
+    calls.push({
+      id: generateToolCallId(),
+      type: "apply_code_action",
+      filePath: match[1].trim(),
+      line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+      character: charMatch ? parseInt(charMatch[1], 10) : undefined,
+      actionTitle: titleMatch ? titleMatch[1].trim() : undefined,
+      status: "pending",
+    });
+  }
+
   // go_to_definition
   const definitionRegex = /@go_to_definition:\s*(\S+)(.*?)(?:\n|$)/g;
   while ((match = definitionRegex.exec(text)) !== null) {

@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 import * as child_process from "child_process";
 import type { ChatSession, InteractionMode } from "./types";
-import { normalizeBaseUrl } from "./helpers";
 import type { SessionManager } from "./session-manager";
 import type { EndpointManager } from "./endpoint-manager";
 import type { MemoryManager } from "./memory-manager";
@@ -12,12 +11,27 @@ import {
   removeBackgroundTasks,
   rerunBackgroundTask,
 } from "./tool-executor";
-import { clearSessionSkills } from "./harness/skills/active";
 import { formatSkillListMessage } from "./harness/skills/intents";
 import { listBuiltinHarnessSkills } from "./harness/skills/builtins";
 import { listHarnessSkills } from "./harness/skills/registry";
 import { buildHarnessRuntimeHealth } from "./harness/runtime-health";
 import { syncHarnessPendingState } from "./harness/state";
+import {
+  buildDoctorReport,
+} from "./slash-command-utils";
+import {
+  applyClearSlashCommand,
+  applyExplicitModeSlashCommand,
+  applyModelSlashCommand,
+  applyQuickModeSlashCommand,
+  applySessionsSlashCommand,
+  applyTodoSlashCommand,
+  applyTokensSlashCommand,
+  buildRefreshSlashStatus,
+  buildSlashHelpContent,
+  resolveEndpointSlashCommand,
+  resolveJobsSlashCommand,
+} from "./slash-command-workflows";
 
 export interface SlashCommandDeps {
   sessionMgr: SessionManager;
@@ -51,39 +65,13 @@ export async function handleSlashCommand(
   switch (cmd) {
     case "/help":
     case "/commands": {
-      const commandLines = [
-        "- `/ask`, `/auto`, `/plan` — switch chat mode quickly",
-        "- `/mode <ask|auto|plan>` — switch chat mode explicitly",
-        "- `/model [name]` — list models or switch the current chat model",
-        "- `/endpoint [name|url]` — list endpoints or switch the active endpoint",
-        "- `/skills [query]` — list skills, optionally filtered",
-        "- `/tasks` or `/todo` — show the current tracked task list",
-        "- `/jobs` — show tracked background commands",
-        "- `/jobs cancel <taskId>` — cancel a background command",
-        "- `/refresh` — refresh models for the active endpoint",
-        "- `/status` or `/doctor` — show harness and endpoint health",
-        "- `/compact` — compact the current chat context",
-        "- `/tokens` — show token usage for this chat",
-        "- `/sessions` — list saved chat sessions",
-        "- `/fork` — fork the current chat into a new one",
-        "- `/branch [name]` — inspect or switch git branches",
-        "- `/memory [query|clear]` — inspect or clear saved memory",
-        "- `/remember <text>` — save a memory",
-        "- `/clear` — clear this chat",
-      ];
       const skillLines = listBuiltinHarnessSkills().map(
         (skill) => `- \`${skill.slashCommand}\` — ${skill.description}`,
       );
 
       session.transcript.push({
         role: "tool",
-        content: [
-          "PocketAI slash commands:",
-          commandLines.join("\n"),
-          "",
-          "Skill shortcuts:",
-          skillLines.join("\n"),
-        ].join("\n"),
+        content: buildSlashHelpContent(skillLines),
       });
       session.status = "Slash command reference ready.";
       deps.sessionMgr.touchSession(session);
@@ -96,13 +84,7 @@ export async function handleSlashCommand(
     case "/auto":
     case "/plan": {
       const mode = cmd.slice(1) as InteractionMode;
-      session.mode = mode;
-      const labels: Record<InteractionMode, string> = {
-        ask: "Ask mode — I'll ask before making changes.",
-        auto: "Auto mode — changes applied automatically.",
-        plan: "Plan mode — I'll describe changes before making them.",
-      };
-      session.status = labels[mode];
+      applyQuickModeSlashCommand(session, mode);
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();
@@ -110,62 +92,42 @@ export async function handleSlashCommand(
     }
 
     case "/clear":
-      session.transcript = [];
-      clearSessionSkills(session);
-      session.status = "Cleared.";
+      applyClearSlashCommand(session);
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();
       return true;
 
     case "/model":
-      if (arg && deps.endpointMgr.models.includes(arg)) {
-        deps.sessionMgr.setSessionModel(session, arg);
-        session.status = `Model switched to ${arg}`;
-      } else {
-        session.status = arg
-          ? `Model "${arg}" not found. Available: ${deps.endpointMgr.models.join(", ")}`
-          : `Available models: ${deps.endpointMgr.models.join(", ")}`;
-        deps.sessionMgr.touchSession(session);
-      }
+      applyModelSlashCommand({
+        session,
+        arg,
+        availableModels: deps.endpointMgr.models,
+        setSessionModel: (modelId) => deps.sessionMgr.setSessionModel(session, modelId),
+      });
+      deps.sessionMgr.touchSession(session);
       deps.updateStatusBar();
       await deps.sessionMgr.saveState();
       deps.postState();
       return true;
 
     case "/endpoint":
-      if (arg) {
-        const match = Array.from(
-          deps.endpointMgr.endpointHealthMap.values(),
-        ).find(
-          (h) =>
-            h.name.toLowerCase() === arg.toLowerCase() ||
-            h.url === normalizeBaseUrl(arg),
-        );
-        if (match) {
-          await deps.selectEndpoint(match.url);
-          session.transcript.push({
-            role: "tool",
-            content: `Switched endpoint to **${match.name}** (\`${match.url}\`).`,
-          });
-          session.status = `Endpoint switch requested: ${match.name}`;
-        } else {
-          session.status = `Endpoint "${arg}" not found.`;
-        }
-      } else {
-        const endpoints = Array.from(deps.endpointMgr.endpointHealthMap.values());
-        const activeUrl = deps.endpointMgr.activeEndpointUrl;
-        session.transcript.push({
-          role: "tool",
-          content: `Available endpoints:\n${endpoints
-            .map((endpoint) => {
-              const marker = endpoint.url === activeUrl ? "*" : "-";
-              const health = endpoint.healthy ? "healthy" : "unreachable";
-              return `${marker} **${endpoint.name}** — \`${endpoint.url}\` (${health})`;
-            })
-            .join("\n")}`,
+      {
+        const endpointOutcome = resolveEndpointSlashCommand({
+          arg,
+          endpoints: Array.from(deps.endpointMgr.endpointHealthMap.values()),
+          activeUrl: deps.endpointMgr.activeEndpointUrl,
         });
-        session.status = `${endpoints.length} endpoint${endpoints.length === 1 ? "" : "s"} available.`;
+        if (endpointOutcome.kind === "switch") {
+          await deps.selectEndpoint(endpointOutcome.endpointUrl);
+          session.transcript.push(endpointOutcome.transcriptEntry);
+          session.status = endpointOutcome.status;
+        } else if (endpointOutcome.kind === "list") {
+          session.transcript.push(endpointOutcome.transcriptEntry);
+          session.status = endpointOutcome.status;
+        } else {
+          session.status = endpointOutcome.status;
+        }
       }
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
@@ -173,24 +135,17 @@ export async function handleSlashCommand(
       return true;
 
     case "/mode":
-      if (arg === "ask" || arg === "auto" || arg === "plan") {
-        session.mode = arg;
-        const labels: Record<InteractionMode, string> = {
-          ask: "Ask mode — I'll ask before making changes.",
-          auto: "Auto mode — changes applied automatically.",
-          plan: "Plan mode — I'll describe changes before making them.",
-        };
-        session.status = labels[arg];
-      } else {
-        session.status = `Usage: /mode <ask|auto|plan>`;
-      }
+      applyExplicitModeSlashCommand(session, arg);
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();
       return true;
 
     case "/sessions":
-      session.status = `Sessions: ${deps.sessionMgr.getSessionSummaries().map((s) => s.title).join(", ")}`;
+      applySessionsSlashCommand(
+        session,
+        deps.sessionMgr.getSessionSummaries().map((s) => s.title),
+      );
       deps.postState();
       return true;
 
@@ -281,20 +236,17 @@ export async function handleSlashCommand(
     }
 
     case "/tokens": {
-      const cum = session.cumulativeTokens;
-      const total = cum.prompt + cum.completion;
-      session.status = total > 0
-        ? `Session tokens — Prompt: ${cum.prompt.toLocaleString()}, Completion: ${cum.completion.toLocaleString()}, Total: ${total.toLocaleString()}`
-        : "No tokens used yet in this session.";
+      applyTokensSlashCommand(session);
       deps.postState();
       return true;
     }
 
     case "/refresh": {
       await deps.refreshModels();
-      session.status = deps.endpointMgr.models.length
-        ? `Refreshed models for ${deps.endpointMgr.getActiveEndpointConfig().name}.`
-        : `Refreshed ${deps.endpointMgr.getActiveEndpointConfig().name}, but no models were found.`;
+      session.status = buildRefreshSlashStatus(
+        deps.endpointMgr.getActiveEndpointConfig().name,
+        deps.endpointMgr.models.length,
+      );
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();
@@ -305,27 +257,10 @@ export async function handleSlashCommand(
     case "/todo": {
       syncHarnessPendingState(session);
       const todoItems = session.harnessState.todoItems || [];
-      if (!todoItems.length) {
-        session.status = "No tracked tasks yet.";
+      if (!applyTodoSlashCommand(session, todoItems).handled) {
         deps.postState();
         return true;
       }
-
-      const lines = todoItems.map((todo, index) => {
-        const icon =
-          todo.status === "completed"
-            ? "[x]"
-            : todo.status === "in_progress"
-              ? "[~]"
-              : "[ ]";
-        return `${index + 1}. ${icon} ${todo.content}`;
-      });
-
-      session.transcript.push({
-        role: "tool",
-        content: `Tracked tasks:\n${lines.join("\n")}`,
-      });
-      session.status = `${todoItems.length} tracked task${todoItems.length === 1 ? "" : "s"}.`;
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();
@@ -335,34 +270,27 @@ export async function handleSlashCommand(
     case "/jobs":
     case "/bg": {
       const backgroundTasks = session.harnessState.backgroundTasks || [];
-      if (/^(?:clear|clean|prune)$/i.test(arg.trim())) {
-        const staleTaskIds = backgroundTasks
-          .filter((task) => task.status !== "running")
-          .map((task) => task.id);
-        if (!staleTaskIds.length) {
-          session.status = "No finished background commands to clear.";
-          deps.postState();
-          return true;
-        }
-        removeBackgroundTasks(staleTaskIds);
-        session.harnessState.backgroundTasks = backgroundTasks.filter(
-          (task) => task.status === "running",
-        );
-        session.transcript.push({
-          role: "tool",
-          content: `Cleared ${staleTaskIds.length} finished background command${staleTaskIds.length === 1 ? "" : "s"}.`,
-        });
-        session.status = `Cleared ${staleTaskIds.length} finished background command${staleTaskIds.length === 1 ? "" : "s"}.`;
+      const jobsOutcome = resolveJobsSlashCommand(arg, backgroundTasks);
+
+      if (jobsOutcome.kind === "clear-none" || jobsOutcome.kind === "none") {
+        session.status = jobsOutcome.status;
+        deps.postState();
+        return true;
+      }
+
+      if (jobsOutcome.kind === "clear") {
+        removeBackgroundTasks(jobsOutcome.staleTaskIds);
+        session.harnessState.backgroundTasks = jobsOutcome.remainingTasks;
+        session.transcript.push(jobsOutcome.transcriptEntry);
+        session.status = jobsOutcome.status;
         deps.sessionMgr.touchSession(session);
         await deps.sessionMgr.saveState();
         deps.postState();
         return true;
       }
 
-      const rerunMatch = arg.match(/^(?:rerun|retry|restart)\s+(.+)$/i);
-      if (rerunMatch) {
-        const taskId = rerunMatch[1].trim();
-        const result = rerunBackgroundTask(taskId, deps.outputChannel);
+      if (jobsOutcome.kind === "rerun") {
+        const result = rerunBackgroundTask(jobsOutcome.taskId, deps.outputChannel);
         session.transcript.push({
           role: "tool",
           content: result,
@@ -374,10 +302,8 @@ export async function handleSlashCommand(
         return true;
       }
 
-      const cancelMatch = arg.match(/^(?:cancel|stop|kill)\s+(.+)$/i);
-      if (cancelMatch) {
-        const taskId = cancelMatch[1].trim();
-        const result = cancelBackgroundTask(taskId);
+      if (jobsOutcome.kind === "cancel") {
+        const result = cancelBackgroundTask(jobsOutcome.taskId);
         session.transcript.push({
           role: "tool",
           content: result,
@@ -389,41 +315,21 @@ export async function handleSlashCommand(
         return true;
       }
 
-      if (arg) {
-        const taskId = arg.trim();
-        const result = checkBackgroundTask(taskId);
+      if (jobsOutcome.kind === "details") {
+        const result = checkBackgroundTask(jobsOutcome.taskId);
         session.transcript.push({
           role: "tool",
           content: result,
         });
-        session.status = `Background task details: ${taskId}`;
+        session.status = jobsOutcome.status;
         deps.sessionMgr.touchSession(session);
         await deps.sessionMgr.saveState();
         deps.postState();
         return true;
       }
 
-      if (!backgroundTasks.length) {
-        session.status = "No background commands tracked in this chat.";
-        deps.postState();
-        return true;
-      }
-
-      session.transcript.push({
-        role: "tool",
-        content: [
-          "Background commands:",
-          backgroundTasks
-            .map(
-              (task) =>
-                `- \`${task.id}\` [${task.status}] \`${task.command}\``,
-            )
-            .join("\n"),
-          "",
-          "Use `/jobs <taskId>` to inspect output, `/jobs cancel <taskId>` to stop a running job, `/jobs rerun <taskId>` to relaunch a finished one, or `/jobs clear` to remove finished jobs from this chat.",
-        ].join("\n"),
-      });
-      session.status = `${backgroundTasks.length} background command${backgroundTasks.length === 1 ? "" : "s"} tracked.`;
+      session.transcript.push(jobsOutcome.transcriptEntry);
+      session.status = jobsOutcome.status;
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();
@@ -451,39 +357,25 @@ export async function handleSlashCommand(
         contextWindowSize,
       });
 
-      const lines = [
-        `- Endpoint: **${endpoint.name || "Unknown"}**`,
-        `- URL: \`${endpoint.url || deps.endpointMgr.baseUrl}\``,
-        `- Provider: \`${capabilities.kind}\``,
-        `- Healthy: ${health?.healthy ? "yes" : "no"}`,
-        `- Model: \`${session.selectedModel || "(auto)"}\``,
-        `- Mode: \`${session.mode}\``,
-        `- Structured tools: ${capabilities.supportsStructuredTools ? "enabled" : "disabled"}`,
-        `- Reasoning support: ${capabilities.supportsReasoningEffort ? "yes" : "no"}`,
-        `- Active skills: ${activeSkills.length ? activeSkills.map((skill) => skill.name).join(", ") : "none"}`,
-        `- Tracked tasks: ${todoItems.length}`,
-        `- Pending approvals: ${pendingApprovals.length}`,
-        `- Background commands: ${backgroundTasks.length}`,
-        `- Estimated context tokens: ${estimatedTokens.toLocaleString()} / ${contextWindowSize.toLocaleString()}`,
-        `- Health summary: ${runtimeHealth.summary}`,
-      ];
-
       session.transcript.push({
         role: "tool",
-        content: [
-          "PocketAI doctor:",
-          lines.join("\n"),
-          "",
-          "Issues:",
-          runtimeHealth.issues.length
-            ? runtimeHealth.issues.map((issue) => `- ${issue}`).join("\n")
-            : "- None detected.",
-          "",
-          "Suggested next actions:",
-          runtimeHealth.suggestions.length
-            ? runtimeHealth.suggestions.map((suggestion) => `- ${suggestion}`).join("\n")
-            : "- No action needed right now.",
-        ].join("\n"),
+        content: buildDoctorReport({
+          endpointName: endpoint.name || "Unknown",
+          endpointUrl: endpoint.url || deps.endpointMgr.baseUrl,
+          providerKind: capabilities.kind,
+          healthy: !!health?.healthy,
+          selectedModel: session.selectedModel,
+          mode: session.mode,
+          supportsStructuredTools: capabilities.supportsStructuredTools,
+          supportsReasoningEffort: capabilities.supportsReasoningEffort,
+          activeSkills,
+          todoItems,
+          pendingApprovalCount: pendingApprovals.length,
+          backgroundTaskCount: backgroundTasks.length,
+          estimatedTokens,
+          contextWindowSize,
+          runtimeHealth,
+        }),
       });
       session.status = "Doctor report ready.";
       deps.sessionMgr.touchSession(session);

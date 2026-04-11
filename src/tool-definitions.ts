@@ -267,6 +267,39 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
   {
     type: "function",
     function: {
+      name: "apply_code_action",
+      description:
+        "Applies a specific VS Code code action at a file position, such as a quick fix or refactor that you already inspected with code_actions. " +
+        "Use this when the editor already offers the exact fix you want and you want to apply it directly instead of editing by hand.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Relative path to the source file where the action is available.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number to inspect for the code action.",
+          },
+          character: {
+            type: "number",
+            description:
+              "0-based character offset on the line. If unsure, use the start of the symbol or error.",
+          },
+          title: {
+            type: "string",
+            description:
+              "Exact code action title to apply. Call code_actions first to inspect available titles.",
+          },
+        },
+        required: ["path", "line", "character", "title"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "find_references",
       description:
         "Finds references to the symbol at a specific file position using VS Code's language intelligence. " +

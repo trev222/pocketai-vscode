@@ -1,7 +1,5 @@
-import { CODEX_BRIDGE_URL } from "./codex-bridge-manager";
 import { normalizeBaseUrl } from "./helpers";
-
-export const LOCAL_POCKETAI_URL = "http://127.0.0.1:39457";
+import { CODEX_BRIDGE_URL, LOCAL_POCKETAI_URL } from "./provider-constants";
 
 export type EndpointProviderKind =
   | "local-pocketai"

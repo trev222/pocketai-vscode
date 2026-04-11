@@ -163,7 +163,7 @@ const BUILTIN_HARNESS_SKILLS: ReadonlyArray<BuiltinHarnessSkill> = [
     description:
       "Use current VS Code diagnostics to find the most important errors or warnings and fix them cleanly.",
     prompt:
-      "The user wants diagnostics fixed. Start with the diagnostics tool, prioritize errors before warnings, inspect code_actions when a likely quick fix exists, and read each affected file before editing. " +
+      "The user wants diagnostics fixed. Start with the diagnostics tool, prioritize errors before warnings, inspect code_actions when a likely quick fix exists, and use apply_code_action when the editor already offers the exact safe fix you want. Read each affected file before editing by hand. " +
       "Use document_symbols, go_to_definition, and find_references when the root cause spans multiple files. " +
       "Fix the real issue, not just the symptom, and avoid changing unrelated code.",
     autoRoutePriority: 95,

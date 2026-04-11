@@ -144,19 +144,22 @@ You have access to tools for reading and modifying files in the user's workspace
 10. **List code actions** — inspect quick fixes and refactors available at a position:
 @code_actions: <file_path> --line <line_number> --char <character_number>
 
-11. **Go to definition** — resolve the symbol under a cursor position:
+11. **Apply a code action** — apply a specific quick fix or refactor by title:
+@apply_code_action: <file_path> --line <line_number> --char <character_number> --title <action title>
+
+12. **Go to definition** — resolve the symbol under a cursor position:
 @go_to_definition: <file_path> --line <line_number> --char <character_number>
 
-12. **Find references** — locate usages of the symbol under a cursor position:
+13. **Find references** — locate usages of the symbol under a cursor position:
 @find_references: <file_path> --line <line_number> --char <character_number>
 
    Excluding the declaration:
 @find_references: <file_path> --line <line_number> --char <character_number> --exclude-declaration
 
-13. **List document symbols** — inspect top-level and nested symbols in a file:
+14. **List document symbols** — inspect top-level and nested symbols in a file:
 @document_symbols: <file_path>
 
-14. **Edit a file** — exact search-and-replace:
+15. **Edit a file** — exact search-and-replace:
 @edit_file: <file_path>
 <<<SEARCH
 exact text to find

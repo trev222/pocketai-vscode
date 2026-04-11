@@ -83,6 +83,7 @@ const STRUCTURED_TOOL_INSTRUCTIONS = `You have tools available via function call
 - To search for a symbol across the workspace, use workspace_symbols.
 - To inspect type/docs/signature info for a symbol at a position, use hover_symbol.
 - To inspect available quick fixes or refactors at a location, use code_actions.
+- To apply one of those editor actions directly, use apply_code_action with the exact title.
 - To modify a file, use edit_file — never run_command with sed/awk.
 - To create a new file, use write_file — never run_command with echo/cat redirection.
 - Use run_command only for shell operations that have no dedicated tool (builds, installs, test runners, etc.).
@@ -677,6 +678,11 @@ function createToolCallFromFunction(
     case "code_actions":
       if (args.line !== undefined) tc.line = Number(args.line);
       if (args.character !== undefined) tc.character = Number(args.character);
+      break;
+    case "apply_code_action":
+      if (args.line !== undefined) tc.line = Number(args.line);
+      if (args.character !== undefined) tc.character = Number(args.character);
+      tc.actionTitle = args.title;
       break;
     case "go_to_definition":
       if (args.line !== undefined) tc.line = Number(args.line);

@@ -334,6 +334,74 @@ export async function executeToolCall(
     }
 
     /* ================================================================ */
+    /*  APPLY CODE ACTION                                                */
+    /* ================================================================ */
+    case "apply_code_action": {
+      try {
+        if (toolCall.line === undefined || toolCall.character === undefined) {
+          return "Error: apply_code_action requires line and character.";
+        }
+        const actionTitle = toolCall.actionTitle?.trim();
+        if (!actionTitle) {
+          return "Error: apply_code_action requires a title.";
+        }
+        const uri = vscode.Uri.file(fullPath);
+        const position = new vscode.Position(
+          Math.max(0, toolCall.line - 1),
+          Math.max(0, toolCall.character),
+        );
+        const range = new vscode.Range(position, position);
+        const results = await vscode.commands.executeCommand<
+          Array<vscode.Command | vscode.CodeAction>
+        >(
+          "vscode.executeCodeActionProvider",
+          uri,
+          range,
+        );
+        const actions = (results || []).filter(
+          (action): action is vscode.CodeAction =>
+            "title" in action && ("edit" in action || "kind" in action || "diagnostics" in action),
+        );
+        const match = actions.find((action) => action.title === actionTitle);
+        if (!match) {
+          return `No code action titled "${actionTitle}" was found at \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}.`;
+        }
+        if (match.disabled) {
+          return `Code action "${actionTitle}" is currently disabled: ${match.disabled.reason}`;
+        }
+
+        let appliedEditEntries = 0;
+        if (match.edit) {
+          appliedEditEntries = Array.from(match.edit.entries()).length;
+          const applied = await vscode.workspace.applyEdit(match.edit);
+          if (!applied) {
+            return `Failed to apply code action "${actionTitle}".`;
+          }
+        }
+        if (match.command) {
+          await vscode.commands.executeCommand(
+            match.command.command,
+            ...(match.command.arguments ?? []),
+          );
+        }
+        if (!match.edit && !match.command) {
+          return `Code action "${actionTitle}" has no executable edit or command.`;
+        }
+        const effect = [
+          appliedEditEntries
+            ? `applied ${appliedEditEntries} workspace edit${appliedEditEntries === 1 ? "" : "s"}`
+            : "",
+          match.command ? `ran command ${match.command.command}` : "",
+        ]
+          .filter(Boolean)
+          .join(" and ");
+        return `Applied code action "${actionTitle}" at \`${toolCall.filePath}\`:${toolCall.line}:${toolCall.character}${effect ? ` (${effect})` : ""}.`;
+      } catch (e) {
+        return `Error applying code action: ${(e as Error).message}`;
+      }
+    }
+
+    /* ================================================================ */
     /*  EDIT FILE                                                        */
     /* ================================================================ */
     case "edit_file": {

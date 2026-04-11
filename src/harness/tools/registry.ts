@@ -29,6 +29,7 @@ import {
   executeWriteFileTool,
 } from "./core";
 import {
+  executeApplyCodeActionTool,
   executeCodeActionsTool,
   executeDefinitionTool,
   executeDiagnosticsTool,
@@ -162,6 +163,11 @@ function createBuiltinToolBehaviors(
     approvalPolicy: "always-auto",
     previewKind: "none",
     execute: async ({ toolCall }) => executeCodeActionsTool(toolCall),
+  },
+  apply_code_action: {
+    approvalPolicy: "mode-auto",
+    previewKind: "none",
+    execute: async ({ toolCall }) => executeApplyCodeActionTool(toolCall),
   },
   go_to_definition: {
     approvalPolicy: "always-auto",

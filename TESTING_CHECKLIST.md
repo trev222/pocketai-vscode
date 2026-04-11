@@ -37,6 +37,8 @@ Use this checklist after reloading the extension host or VS Code window.
 - Switch back to `Local PocketAI` and verify the reasoning selector disappears again.
 - After switching away from Codex, send a prompt and verify the request still succeeds with no reasoning-related error.
 - Create a new chat and verify it inherits the most recently selected model.
+- Reload the window with multiple chats saved and verify invalid/stale models fall back cleanly to an available model.
+- Reload the window after a Codex chat was using reasoning and verify stale reasoning does not leak onto a non-reasoning endpoint.
 
 ## Sessions
 
@@ -44,11 +46,14 @@ Use this checklist after reloading the extension host or VS Code window.
 - Verify the renamed title persists after switching chats.
 - Open `History`, switch chats, and verify the active session changes correctly.
 - Create a new chat from `History` and verify it opens immediately.
+- Delete the currently active chat and verify the UI falls back to the most recent remaining chat.
+- Delete a chat that is open in a panel and verify the panel rebinds to the fallback session instead of breaking.
 
 ## Modes
 
 - Run `/ask`, `/auto`, and `/plan` and verify each switches the chat mode immediately.
 - Run `/mode ask`, `/mode auto`, and `/mode plan` and verify they still work.
+- Run `/mode nope` and verify it shows usage guidance instead of changing mode.
 - Run `/help` and verify it lists the current slash commands and built-in skill shortcuts.
 - Run `/refresh` and verify models refresh for the active endpoint.
 
@@ -56,6 +61,7 @@ Use this checklist after reloading the extension host or VS Code window.
 
 - Run `what skills do you have?` and verify the built-in PocketAI skill list is returned instantly.
 - Run `is the debug skill available?` and verify the answer is returned instantly.
+- Run `use the missing skill` and verify PocketAI answers locally that it is unavailable.
 - Run `/skills` and verify it prints the current skill catalog.
 - Run `/skills debug` and verify it filters the list correctly.
 - Run `use the debug skill and inspect this error` and verify the `debug` skill is activated.
@@ -63,6 +69,8 @@ Use this checklist after reloading the extension host or VS Code window.
 - Activate multiple skills such as `/debug` and `/review` and verify both chips appear.
 - Remove one active skill chip and verify only that skill is removed.
 - Use `/clear` and verify active skills are cleared.
+- Run `/debug` with no extra text and verify it only activates the skill chip without sending a model turn yet.
+- Run `/debug inspect this crash` and verify it both activates the skill and uses the remainder as the actual prompt.
 
 ## Skill Workflows
 
@@ -70,6 +78,13 @@ Use this checklist after reloading the extension host or VS Code window.
 - Run `review my changes` and verify the response uses git context.
 - Run `what is this project?` or `/init` and verify the response uses project structure context.
 - Run `investigate why this is failing` and verify the response starts with evidence gathering rather than an immediate guess.
+
+## Prompt Routing
+
+- Send a normal prompt that should auto-route, such as `please investigate why this is failing`, and verify the inferred skill chip appears before the turn runs.
+- Send a prompt that should stay plain chat, and verify no unexpected skill chip appears.
+- Switch to an endpoint with no available models, send a prompt, and verify PocketAI blocks the turn with a clear no-model status instead of entering a stuck busy state.
+- Send a prompt with images or files attached and verify the turn still starts normally with the same prompt-routing behavior.
 
 ## Task Tracking
 
@@ -88,6 +103,7 @@ Use this checklist after reloading the extension host or VS Code window.
 - Ask PocketAI to search workspace symbols for a known name and verify it returns matching locations.
 - Ask PocketAI for hover info on a known symbol and verify it returns type/docs/signature context.
 - Ask PocketAI to list code actions for a location with an error or quick fix and verify it returns editor-suggested actions.
+- Ask PocketAI to apply a known code action by exact title and verify the suggested quick fix/refactor is applied.
 - Request a precise edit and verify approval flow still appears when needed.
 - Request a file creation and verify it succeeds.
 - Ask for diagnostics, definitions, references, or document symbols and verify those IDE-backed tools respond correctly.
@@ -118,6 +134,7 @@ Use this checklist after reloading the extension host or VS Code window.
 - Start a long-running background command, reload the window, and verify it comes back as `interrupted` instead of disappearing.
 - After reload, run `/jobs <taskId>` on that interrupted job and verify the preserved details still render.
 - After reload, rerun that interrupted job and verify it starts a fresh background command successfully.
+- Run `/jobs clear` when only running jobs exist and verify PocketAI reports that there is nothing to clear.
 
 ## Chat UX
 
@@ -130,10 +147,13 @@ Use this checklist after reloading the extension host or VS Code window.
 
 - Reload the window and verify sessions restore correctly.
 - Reload the window and verify active endpoint selection restores correctly.
+- Reload the window and verify restored sessions are synced to the active endpoint rather than keeping stale per-session endpoint values.
 - Edit `.pocketai.md`, `AGENTS.md`, or `CLAUDE.md` and verify PocketAI picks up the updated guidance after reload or file change.
 - Reload the window during a running background command and verify the `Status` card and harness task list both mention interrupted work.
 - Run `/doctor` and verify the report includes endpoint, provider, model, mode, skills, tracked tasks, approvals, background commands, and token estimate.
 - Run `/status` and verify it behaves like `/doctor`.
+- Run `/endpoint missing-name` and verify it fails cleanly without changing the active endpoint.
+- Run `/model missing-model` and verify it fails cleanly without changing the current session model.
 - Verify the harness pane shows a `Status` card when the endpoint is unhealthy, approvals are pending, context is getting full, or background work needs attention.
 - Verify the `Status` card quick actions work, especially `Compact`, `Refresh Models`, and `Jobs` when those situations apply.
 - Verify the extension still works when Codex is unavailable.

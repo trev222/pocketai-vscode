@@ -10,9 +10,13 @@ import type {
 import { normalizeBaseUrl } from "./helpers";
 import {
   getEndpointCapabilities,
-  LOCAL_POCKETAI_URL,
   type EndpointCapabilities,
 } from "./provider-capabilities";
+import { LOCAL_POCKETAI_URL } from "./provider-constants";
+import {
+  applyRefreshedModelsToSessions,
+  resolveActiveEndpointUrl,
+} from "./endpoint-workflows";
 
 /**
  * ID prefixes for non-chat models (image gen, video gen, voice/TTS/STT).
@@ -124,14 +128,12 @@ export class EndpointManager {
       !this.activeEndpointUrl ||
       !this.endpointHealthMap.has(this.activeEndpointUrl)
     ) {
-      const fallbackUrl = normalizeBaseUrl(
-        endpoints[0]?.url ?? LOCAL_POCKETAI_URL,
-      );
-      this.activeEndpointUrl =
-        storedActiveEndpointUrl &&
-        this.endpointHealthMap.has(storedActiveEndpointUrl)
-          ? storedActiveEndpointUrl
-          : fallbackUrl;
+      this.activeEndpointUrl = resolveActiveEndpointUrl({
+        endpoints,
+        currentActiveEndpointUrl: this.activeEndpointUrl,
+        storedActiveEndpointUrl,
+        fallbackUrl: LOCAL_POCKETAI_URL,
+      });
       void this.persistActiveEndpointUrl();
     }
   }
@@ -267,19 +269,11 @@ export class EndpointManager {
         activeHealth.lastChecked = Date.now();
       }
 
-      const fallbackModel = getPreferredModel(this.models) || this.models[0] || "";
-      for (const session of sessions.values()) {
-        if (
-          !session.selectedModel ||
-          !this.models.includes(session.selectedModel)
-        ) {
-          session.selectedModel = fallbackModel;
-          session.selectedReasoningEffort = "";
-        }
-        session.status = this.models.length
-          ? `Connected — ${this.models.length} model${this.models.length > 1 ? "s" : ""} available`
-          : "Server reachable, but no models found.";
-      }
+      applyRefreshedModelsToSessions(
+        sessions.values(),
+        this.models,
+        getPreferredModel,
+      );
 
       if (this.models.length) {
         this.statusSummary = `OK — ${this.models.length} model(s)`;

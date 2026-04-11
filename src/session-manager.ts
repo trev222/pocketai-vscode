@@ -13,9 +13,24 @@ import {
   DEFAULT_STATUS,
   DEFAULT_MAX_TOKENS,
 } from "./constants";
-import { createId, formatTokenCount, isDefaultSessionTitle, summarizePrompt } from "./helpers";
+import { createId, formatTokenCount } from "./helpers";
 import { streamResponse, buildMessages, type StreamingDeps } from "./streaming";
 import { createEmptyHarnessSessionState } from "./harness/state";
+import {
+  deriveLastSelectedModel,
+  getPreferredModelForNewSession,
+  restoreSessionFromPersistence,
+  serializeSessionForPersistence,
+} from "./session-persistence";
+import {
+  buildSessionSummaries,
+  resolveAutoSessionTitle,
+  resolveRenamedSessionTitle,
+  resolveSessionDeletion,
+  resolveSidebarSessionId,
+  sortSessionsByRecency,
+} from "./session-workflows";
+import { buildConnectedSessionStatus } from "./endpoint-workflows";
 
 export class SessionManager {
   readonly sessions = new Map<string, ChatSession>();
@@ -33,75 +48,27 @@ export class SessionManager {
     this.nextSessionNumber = Math.max(1, stored.nextSessionNumber || 1);
     this.sidebarSessionId = stored.sidebarSessionId || "";
     this.lastSelectedModel = (stored.lastSelectedModel ?? "").trim();
-    for (const session of stored.sessions ?? []) {
-      const hadRunningBackgroundTasks =
-        session.backgroundTasks?.some((task) => task.status === "running") ?? false;
-      const restoredBackgroundTasks = restorePersistedBackgroundTasks(
-        session.backgroundTasks,
-      );
+    for (const storedSession of stored.sessions ?? []) {
+      const restored = restoreSessionFromPersistence(storedSession);
       normalizedBackgroundTasks =
-        normalizedBackgroundTasks ||
-        hadRunningBackgroundTasks;
-
-      this.sessions.set(session.id, {
-        ...session,
-        selectedReasoningEffort:
-          (session as ChatSession).selectedReasoningEffort ?? "",
-        busy: false,
-        checkpoints: [],
-        cumulativeTokens: (session as ChatSession).cumulativeTokens ?? { prompt: 0, completion: 0 },
-        activeSkills: [],
-        harnessState: {
-          ...createEmptyHarnessSessionState(),
-          backgroundTasks: restoredBackgroundTasks,
-        },
-      });
+        normalizedBackgroundTasks || restored.hadRunningBackgroundTasks;
+      this.sessions.set(restored.session.id, restored.session);
     }
-    if (!this.sessions.has(this.sidebarSessionId)) {
-      this.sidebarSessionId = this.getMostRecentSession()?.id ?? "";
-    }
-    if (!this.lastSelectedModel) {
-      this.lastSelectedModel =
-        this.getSessionsByRecency().find((session) => session.selectedModel)
-          ?.selectedModel ?? "";
-    }
+    this.sidebarSessionId = resolveSidebarSessionId(
+      this.sidebarSessionId,
+      Array.from(this.sessions.values()),
+    );
+    this.lastSelectedModel = deriveLastSelectedModel(
+      this.lastSelectedModel,
+      this.getSessionsByRecency(),
+    );
     return normalizedBackgroundTasks;
   }
 
   async saveState() {
-    const sessions: PersistedChatSession[] = Array.from(this.sessions.values()).map((s) => ({
-      id: s.id,
-      title: s.title,
-      transcript: s.transcript.map((e) => {
-        const nextEntry = { ...e };
-        if (e.images?.length) {
-          nextEntry.images = e.images.map((img) => ({ ...img, data: "" }));
-        }
-        if (e.files?.length) {
-          nextEntry.files = e.files.map((file) => ({ ...file, content: "" }));
-        }
-        return nextEntry;
-      }),
-      selectedModel: s.selectedModel,
-      selectedReasoningEffort: s.selectedReasoningEffort,
-      selectedEndpoint: s.selectedEndpoint,
-      status: s.status,
-      updatedAt: s.updatedAt,
-      mode: s.mode,
-      cumulativeTokens: s.cumulativeTokens,
-      backgroundTasks: s.harnessState.backgroundTasks.map((task) => ({
-        id: task.id,
-        command: task.command,
-        status: task.status,
-        outputPreview:
-          task.outputPreview.length > 4000
-            ? task.outputPreview.slice(-4000)
-            : task.outputPreview,
-        exitCode: task.exitCode,
-        updatedAt: task.updatedAt,
-        cwd: task.cwd,
-      })),
-    }));
+    const sessions: PersistedChatSession[] = Array.from(this.sessions.values()).map(
+      serializeSessionForPersistence,
+    );
 
     await this.context.workspaceState.update(STORAGE_KEY, {
       sessions,
@@ -132,7 +99,7 @@ export class SessionManager {
 
     session.selectedModel = this.getPreferredModel(models);
     if (models.length) {
-      session.status = `Connected — ${models.length} model${models.length > 1 ? "s" : ""} available`;
+      session.status = buildConnectedSessionStatus(models.length);
     }
 
     this.sessions.set(session.id, session);
@@ -152,11 +119,14 @@ export class SessionManager {
       this.sidebarSessionId = replacement.id;
     }
 
-    const fallbackId =
-      this.getMostRecentSession()?.id ?? this.createSession(models).id;
-    if (this.sidebarSessionId === sessionId) {
-      this.sidebarSessionId = fallbackId;
-    }
+    const deletion = resolveSessionDeletion(
+      sessionId,
+      this.sidebarSessionId,
+      this.getSessionsByRecency(),
+    );
+    const fallbackId = deletion.fallbackSessionId ?? this.createSession(models).id;
+    this.sidebarSessionId =
+      deletion.nextSidebarSessionId || fallbackId;
 
     void this.saveState();
     return fallbackId;
@@ -183,23 +153,19 @@ export class SessionManager {
   }
 
   getPreferredModel(models: string[]): string {
-    if (!models.length) return "";
-    if (this.lastSelectedModel && models.includes(this.lastSelectedModel)) {
-      return this.lastSelectedModel;
-    }
-
-    const recentMatch = this.getSessionsByRecency().find(
-      (session) => session.selectedModel && models.includes(session.selectedModel),
+    return getPreferredModelForNewSession(
+      models,
+      this.lastSelectedModel,
+      this.getSessionsByRecency(),
     );
-    return recentMatch?.selectedModel || models[0] || "";
   }
 
   renameSession(sessionId: string, title: string): ChatSession | undefined {
     const session = this.sessions.get(sessionId);
     if (!session) return undefined;
 
-    const nextTitle = title.trim().replace(/\s+/g, " ").slice(0, 120);
-    if (!nextTitle || nextTitle === session.title) return session;
+    const nextTitle = resolveRenamedSessionTitle(session.title, title);
+    if (!nextTitle) return session;
 
     session.title = nextTitle;
     this.touchSession(session);
@@ -312,11 +278,7 @@ export class SessionManager {
   }
 
   getSessionSummaries(): SessionSummary[] {
-    return this.getSessionsByRecency().map((s) => ({
-      id: s.id,
-      title: s.title,
-      updatedAt: s.updatedAt,
-    }));
+    return buildSessionSummaries(this.getSessionsByRecency());
   }
 
   getMostRecentSession(): ChatSession | undefined {
@@ -332,48 +294,17 @@ export class SessionManager {
   }
 
   autoTitle(session: ChatSession, prompt: string) {
-    if (isDefaultSessionTitle(session.title)) {
-      session.title = summarizePrompt(prompt, this.nextSessionNumber - 1);
+    const nextTitle = resolveAutoSessionTitle(
+      session.title,
+      prompt,
+      this.nextSessionNumber - 1,
+    );
+    if (nextTitle) {
+      session.title = nextTitle;
     }
   }
 
   private getSessionsByRecency(): ChatSession[] {
-    return Array.from(this.sessions.values()).sort(
-      (a, b) => b.updatedAt - a.updatedAt,
-    );
+    return sortSessionsByRecency(Array.from(this.sessions.values()));
   }
-}
-
-function restorePersistedBackgroundTasks(
-  tasks: HarnessBackgroundTask[] | undefined,
-): HarnessBackgroundTask[] {
-  if (!Array.isArray(tasks)) return [];
-
-  return tasks
-    .map((task) => {
-      const status =
-        task.status === "running" ? "interrupted" : task.status;
-      const note =
-        task.status === "running"
-          ? "[Interrupted after PocketAI reload]"
-          : "";
-      const outputPreview = [note, String(task.outputPreview || "").trim()]
-        .filter(Boolean)
-        .join("\n");
-
-      return {
-        id: String(task.id || "").trim(),
-        command: String(task.command || "").trim(),
-        status,
-        outputPreview,
-        exitCode:
-          typeof task.exitCode === "number" ? task.exitCode : undefined,
-        updatedAt:
-          typeof task.updatedAt === "number" ? task.updatedAt : Date.now(),
-        cwd: typeof task.cwd === "string" ? task.cwd.trim() : "",
-      } satisfies HarnessBackgroundTask;
-    })
-    .filter((task) => task.id && task.command)
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, 20);
 }

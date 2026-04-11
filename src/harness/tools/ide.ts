@@ -245,6 +245,68 @@ export async function executeCodeActionsTool(toolCall: ToolCall): Promise<string
   return `Code actions for ${target.relativePath}:${position.line + 1}:${position.character}:\n${lines.join("\n")}${suffix}`;
 }
 
+export async function executeApplyCodeActionTool(toolCall: ToolCall): Promise<string> {
+  const target = await resolveWorkspaceDocument(toolCall.filePath);
+  if (!target) {
+    return `Could not open file: ${toolCall.filePath}`;
+  }
+
+  const position = createPosition(toolCall);
+  if (!position) {
+    return "apply_code_action requires line and character.";
+  }
+
+  const actionTitle = toolCall.actionTitle?.trim();
+  if (!actionTitle) {
+    return "apply_code_action requires a title. Use code_actions first to inspect available actions.";
+  }
+
+  const actions = await getCodeActionsAtPosition(target.uri, position);
+  if (!actions.length) {
+    return `No code actions found at ${target.relativePath}:${position.line + 1}:${position.character}.`;
+  }
+
+  const match = actions.find((action) => action.title === actionTitle);
+  if (!match) {
+    return `No code action titled "${actionTitle}" was found at ${target.relativePath}:${position.line + 1}:${position.character}.`;
+  }
+
+  if (match.disabled) {
+    return `Code action "${actionTitle}" is currently disabled: ${match.disabled.reason}`;
+  }
+
+  let appliedEditEntries = 0;
+  if (match.edit) {
+    appliedEditEntries = Array.from(match.edit.entries()).length;
+    const applied = await vscode.workspace.applyEdit(match.edit);
+    if (!applied) {
+      return `Failed to apply code action "${actionTitle}".`;
+    }
+  }
+
+  if (match.command) {
+    await vscode.commands.executeCommand(
+      match.command.command,
+      ...(match.command.arguments ?? []),
+    );
+  }
+
+  if (!match.edit && !match.command) {
+    return `Code action "${actionTitle}" has no executable edit or command.`;
+  }
+
+  const effect = [
+    appliedEditEntries
+      ? `applied ${appliedEditEntries} workspace edit${appliedEditEntries === 1 ? "" : "s"}`
+      : "",
+    match.command ? `ran command ${match.command.command}` : "",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+
+  return `Applied code action "${actionTitle}" at ${target.relativePath}:${position.line + 1}:${position.character}${effect ? ` (${effect})` : ""}.`;
+}
+
 export async function executeReferencesTool(toolCall: ToolCall): Promise<string> {
   const target = await resolveWorkspaceDocument(toolCall.filePath);
   if (!target) {
@@ -452,6 +514,25 @@ function formatCodeAction(action: vscode.Command | vscode.CodeAction): string {
 
   const command = action as vscode.Command;
   return `- ${command.title}${command.command ? ` [command: ${command.command}]` : ""}`;
+}
+
+async function getCodeActionsAtPosition(
+  uri: vscode.Uri,
+  position: vscode.Position,
+): Promise<vscode.CodeAction[]> {
+  const range = new vscode.Range(position, position);
+  const results = await vscode.commands.executeCommand<
+    Array<vscode.Command | vscode.CodeAction>
+  >(
+    "vscode.executeCodeActionProvider",
+    uri,
+    range,
+  );
+
+  return (results || []).filter(
+    (action): action is vscode.CodeAction =>
+      "title" in action && ("edit" in action || "kind" in action || "diagnostics" in action),
+  );
 }
 
 function formatHoverContent(

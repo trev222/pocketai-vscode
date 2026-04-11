@@ -13,6 +13,7 @@ export type ToolCallType =
   | "workspace_symbols"
   | "hover_symbol"
   | "code_actions"
+  | "apply_code_action"
   | "go_to_definition"
   | "find_references"
   | "document_symbols"
@@ -47,6 +48,8 @@ export type ToolCall = {
   // skills
   skillName?: string;
   skillPrompt?: string;
+  actionTitle?: string;
+  actionKind?: string;
   // edit_file
   query?: string;
   search?: string;

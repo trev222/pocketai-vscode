@@ -7,9 +7,9 @@ import * as vscode from "vscode";
 import type { EndpointConfig } from "./types";
 import type { EndpointManager } from "./endpoint-manager";
 import { normalizeBaseUrl } from "./helpers";
+import { CODEX_BRIDGE_URL } from "./provider-constants";
 
 export const CODEX_BRIDGE_NAME = "Codex Bridge";
-export const CODEX_BRIDGE_URL = "http://127.0.0.1:39458";
 const CODEX_BRIDGE_ROOT_URL = `${CODEX_BRIDGE_URL}/`;
 const CODEX_BRIDGE_META_URL = `${CODEX_BRIDGE_URL}/codex/meta`;
 const CODEX_BRIDGE_POLL_MS = 5000;

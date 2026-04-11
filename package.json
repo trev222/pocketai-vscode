@@ -255,7 +255,8 @@
   "scripts": {
     "codex-bridge": "node ./scripts/codex-openai-bridge.mjs",
     "build": "tsc --project tsconfig.json",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.cjs"
   },
   "devDependencies": {
     "@types/node": "24.3.1",

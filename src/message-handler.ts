@@ -2,7 +2,6 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import type {
-  InteractionMode,
   WebviewToExtensionMessage,
   ExtensionToWebviewMessage,
 } from "./types";
@@ -17,6 +16,14 @@ import {
   removeBackgroundTasks,
   rerunBackgroundTask,
 } from "./tool-executor";
+import {
+  buildClearedBackgroundTasksMessage,
+  buildSessionExportFileName,
+  buildSessionExportMarkdown,
+  filterSessionSummariesByQuery,
+  getFinishedBackgroundTaskIds,
+  getInteractionModeStatus,
+} from "./chat-workflows";
 
 export interface MessageHandlerDeps {
   sessionMgr: SessionManager;
@@ -143,12 +150,7 @@ export function setupChatMessageHandler(
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
           session.mode = message.mode;
-          const modeLabels: Record<InteractionMode, string> = {
-            ask: "Ask mode — I'll ask before making changes.",
-            auto: "Auto mode — changes applied automatically.",
-            plan: "Plan mode — I'll describe changes before making them.",
-          };
-          session.status = modeLabels[session.mode];
+          session.status = getInteractionModeStatus(session.mode);
           deps.sessionMgr.touchSession(session);
           await deps.sessionMgr.saveState();
           deps.postState();
@@ -185,16 +187,10 @@ export function setupChatMessageHandler(
         case "exportSession": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
-          const md = session.transcript
-            .filter((e) => e.role === "user" || e.role === "assistant")
-            .map(
-              (e) =>
-                `## ${e.role === "user" ? "You" : "PocketAI"}\n\n${e.content}\n`,
-            )
-            .join("\n");
+          const md = buildSessionExportMarkdown(session.transcript);
           const uri = await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.file(
-              `${session.title.replace(/[^a-zA-Z0-9]/g, "_")}.md`,
+              buildSessionExportFileName(session.title),
             ),
             filters: { Markdown: ["md"] },
           });
@@ -208,20 +204,16 @@ export function setupChatMessageHandler(
         }
 
         case "searchSessions": {
-          const query = message.query.toLowerCase();
-          if (!query) {
+          const query = message.query;
+          if (!query.trim()) {
             deps.postState();
             return;
           }
-          const filtered = deps.sessionMgr
-            .getSessionSummaries()
-            .filter((s) => {
-              if (s.title.toLowerCase().includes(query)) return true;
-              const sess = deps.sessionMgr.sessions.get(s.id);
-              return sess?.transcript.some((e) =>
-                e.content.toLowerCase().includes(query),
-              );
-            });
+          const filtered = filterSessionSummariesByQuery(
+            query,
+            deps.sessionMgr.getSessionSummaries(),
+            deps.sessionMgr.sessions.values(),
+          );
           for (const wv of deps.webviews) {
             wv.postMessage({
               type: "filteredSessions",
@@ -369,9 +361,9 @@ export function setupChatMessageHandler(
         case "clearBackgroundTasks": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
-          const staleTaskIds = session.harnessState.backgroundTasks
-            .filter((task) => task.status !== "running")
-            .map((task) => task.id);
+          const staleTaskIds = getFinishedBackgroundTaskIds(
+            session.harnessState.backgroundTasks,
+          );
           if (!staleTaskIds.length) {
             session.status = "No finished background commands to clear.";
             deps.postState();
@@ -381,7 +373,7 @@ export function setupChatMessageHandler(
           session.harnessState.backgroundTasks = session.harnessState.backgroundTasks.filter(
             (task) => task.status === "running",
           );
-          const result = `Cleared ${staleTaskIds.length} finished background command${staleTaskIds.length === 1 ? "" : "s"}.`;
+          const result = buildClearedBackgroundTasksMessage(staleTaskIds.length);
           session.transcript.push({
             role: "tool",
             content: result,

@@ -40,12 +40,29 @@ import { TerminalManager } from "./terminal-manager";
 import { MemoryManager } from "./memory-manager";
 import { handleSlashCommand, type SlashCommandDeps } from "./slash-commands";
 import { setupChatMessageHandler, type MessageHandlerDeps } from "./message-handler";
-import { CodexBridgeManager, CODEX_BRIDGE_URL } from "./codex-bridge-manager";
+import { CodexBridgeManager } from "./codex-bridge-manager";
 import {
   buildCodexReasoningControlsState,
   buildProviderChatControlsState,
 } from "./provider-chat-state";
-import { LOCAL_POCKETAI_URL } from "./provider-capabilities";
+import { CODEX_BRIDGE_URL, LOCAL_POCKETAI_URL } from "./provider-constants";
+import { syncSessionsToActiveEndpoint } from "./endpoint-workflows";
+import {
+  bindPanelToSession,
+  getPanelsBoundToSession,
+  rebindDeletedSessionPanels,
+} from "./panel-session-workflows";
+import {
+  buildBackgroundTaskRestoreSnapshots,
+  resolveExistingSessionId,
+  shouldPersistStartupState,
+} from "./startup-workflows";
+import {
+  buildCancelledLoopOutcome,
+  buildFailedLoopOutcome,
+  getPostLoopReadyStatus,
+  shouldFinalizeCompletedLoop,
+} from "./run-loop-workflows";
 import {
   applyHarnessEventToSession,
   clearPendingToolState,
@@ -56,23 +73,22 @@ import type { HarnessEvent } from "./harness/types";
 import { DefaultHarnessToolRuntime } from "./harness/runtime";
 import { createHarnessToolRegistry } from "./harness/tools/registry";
 import {
-  detectSkillPromptIntent,
-  formatSkillAvailabilityMessage,
-  formatSkillListMessage,
-  resolveSkillByIntent,
-} from "./harness/skills/intents";
-import {
-  getBuiltinHarnessSkillBySlashCommand,
-  inferBuiltinHarnessSkillFromPrompt,
-} from "./harness/skills/builtins";
-import {
-  activateSessionSkill,
   clearSessionSkills,
-  formatActiveSkillsStatus,
 } from "./harness/skills/active";
 import { buildSkillPreflightContext } from "./harness/skills/preflight";
 import { listHarnessSkills } from "./harness/skills/registry";
 import { buildHarnessRuntimeHealth } from "./harness/runtime-health";
+import {
+  beginPromptTurn,
+  preparePromptForSend,
+} from "./prompt-workflows";
+import {
+  applyErroredToolCallResult,
+  applyExecutedToolCallResult,
+  applyRejectedToolCallResult,
+  findToolCallInTranscript,
+  shouldContinueAfterToolResolution,
+} from "./tool-approval-workflows";
 
 /* ────────────────────────────── Activation ────────────────────────────── */
 
@@ -188,23 +204,25 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
     const normalizedRestoredTasks = this.sessionMgr.restoreState();
     restoreBackgroundTaskSnapshots(
-      Array.from(this.sessionMgr.sessions.values()).flatMap((session) =>
-        session.harnessState.backgroundTasks.map((task) => ({
-          ...task,
-          sessionId: session.id,
-        })),
+      buildBackgroundTaskRestoreSnapshots(
+        Array.from(this.sessionMgr.sessions.values()),
       ),
     );
+    let createdInitialSession = false;
     if (!this.sessionMgr.sessions.size) {
       const session = this.sessionMgr.createSession(this.endpointMgr.models);
       this.sessionMgr.sidebarSessionId = session.id;
-      void this.sessionMgr.saveState();
-    }
-    if (normalizedRestoredTasks) {
-      void this.sessionMgr.saveState();
+      createdInitialSession = true;
     }
     this.endpointMgr.initEndpoints();
-    if (this.syncSessionEndpointSelections()) {
+    const endpointSelectionsSynced = this.syncSessionEndpointSelections();
+    if (
+      shouldPersistStartupState({
+        createdInitialSession,
+        normalizedRestoredTasks,
+        endpointSelectionsSynced,
+      })
+    ) {
       void this.sessionMgr.saveState();
     }
     this.startEndpointHealthChecks();
@@ -865,81 +883,52 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   ) {
     const session = this.sessionMgr.requireSession(sessionId);
     let loopResult: Awaited<ReturnType<typeof runToolLoop>> | undefined;
-    let trimmed = prompt.trim();
-    if (!session || (!trimmed && !images?.length && !files?.length) || session.busy) return;
+    const initialTrimmed = prompt.trim();
+    if (!session || (!initialTrimmed && !images?.length && !files?.length) || session.busy) return;
 
     // Slash commands
-    if (trimmed.startsWith("/")) {
-      const handled = await this.handleSlashCommandMethod(session, trimmed);
+    if (initialTrimmed.startsWith("/")) {
+      const handled = await this.handleSlashCommandMethod(session, initialTrimmed);
       if (handled) return;
-
-      // Skill slash commands
-      const parts = trimmed.split(/\s+/);
-      const cmd = parts[0].toLowerCase();
-      const arg = parts.slice(1).join(" ").trim();
-      const skillDef = getBuiltinHarnessSkillBySlashCommand(cmd);
-      if (skillDef) {
-        activateSessionSkill(session, skillDef, arg || undefined);
-        if (!arg) {
-          session.status = formatActiveSkillsStatus(session.activeSkills);
-          this.sessionMgr.touchSession(session);
-          this.postState();
-          return;
-        }
-        trimmed = arg;
-      }
     }
-
-    const skillIntent = detectSkillPromptIntent(trimmed);
-    if (skillIntent) {
-      const handled = await this.handleSkillPromptIntent(session, skillIntent, trimmed);
-      if (handled.handled) {
-        return;
+    const preparedPrompt = preparePromptForSend({
+      session,
+      prompt: initialTrimmed,
+      availableSkills: listHarnessSkills(),
+      preferredModel: this.sessionMgr.getPreferredModel(this.endpointMgr.models),
+      fallbackTitleNumber: this.sessionMgr.nextSessionNumber - 1,
+    });
+    if (preparedPrompt.kind === "handled") {
+      if (preparedPrompt.titleChanged) {
+        this.updateBoundTitles(session.id);
       }
-      if (handled.nextPrompt !== undefined) {
-        trimmed = handled.nextPrompt;
-      }
+      this.sessionMgr.touchSession(session);
+      await this.sessionMgr.saveState();
+      this.postState();
+      return;
     }
-
-    if (!session.activeSkills.length && trimmed.length >= 8) {
-      const inferredSkill = inferBuiltinHarnessSkillFromPrompt(trimmed);
-      if (inferredSkill) {
-        activateSessionSkill(session, inferredSkill);
-      }
+    if (preparedPrompt.kind === "blocked") {
+      this.postState();
+      return;
     }
-
-    if (!session.selectedModel) {
-      const preferredModel = this.sessionMgr.getPreferredModel(this.endpointMgr.models);
-      if (!preferredModel) {
-        session.status = "No model selected. Click refresh or check your server.";
-        this.postState();
-        return;
-      }
-      session.selectedModel = preferredModel;
-    }
+    const trimmed = preparedPrompt.prompt;
 
     const resolvedPrompt = await injectAtMentionContent(trimmed, this.config);
-    const userEntry: import("./types").ChatEntry = {
-      role: "user",
-      content: resolvedPrompt,
-    };
-    if (images?.length) {
-      userEntry.images = images;
+    const promptStart = beginPromptTurn({
+      session,
+      rawPrompt: trimmed,
+      resolvedPrompt,
+      fallbackTitleNumber: this.sessionMgr.nextSessionNumber - 1,
+      images,
+      files,
+    });
+    if (promptStart.titleChanged) {
+      this.updateBoundTitles(session.id);
     }
-    if (files?.length) {
-      userEntry.files = files;
-    }
-    session.transcript.push(userEntry);
-    this.sessionMgr.autoTitle(session, trimmed);
-    this.updateBoundTitles(session.id);
-    session.busy = true;
-    session.status = session.activeSkills.length
-      ? "Preparing skill context..."
-      : "Thinking...";
     this.sessionMgr.touchSession(session);
     this.postState();
 
-    if (session.activeSkills.length) {
+    if (promptStart.needsSkillPreflight) {
       session.skillPreflightContext = await buildSkillPreflightContext(
         session,
         this.getToolLoopDeps(),
@@ -956,27 +945,20 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
     try {
       loopResult = await runToolLoop(session, this.getToolLoopDeps());
-      if (loopResult.stoppedBecause !== "pending_approval") {
-        session.status = "Ready";
-      }
+      session.status =
+        getPostLoopReadyStatus(loopResult.stoppedBecause) ?? session.status;
       this.outputChannel.appendLine(
         `← Response received [${session.id}]`,
       );
     } catch (error) {
       if ((error as Error).name === "AbortError") {
-        session.status = "Cancelled.";
-        session.transcript.push({
-          role: "assistant",
-          content: "_Request cancelled._",
-        });
+        const outcome = buildCancelledLoopOutcome();
+        session.status = outcome.status;
+        session.transcript.push(outcome.transcriptEntry);
       } else {
-        const message =
-          error instanceof Error ? error.message : "Request failed.";
-        session.status = message;
-        session.transcript.push({
-          role: "assistant",
-          content: `**Error:** ${message}`,
-        });
+        const outcome = buildFailedLoopOutcome(error);
+        session.status = outcome.status;
+        session.transcript.push(outcome.transcriptEntry);
       }
       this.outputChannel.appendLine(
         `✗ Error [${session.id}]: ${(error as Error).message}`,
@@ -984,7 +966,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     } finally {
       session.busy = false;
       session.currentRequest = undefined;
-      if (loopResult?.stoppedBecause !== "pending_approval") {
+      if (shouldFinalizeCompletedLoop(loopResult?.stoppedBecause)) {
         clearSessionSkills(session);
         this.notifyCompletion(session);
       }
@@ -992,80 +974,6 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       await this.sessionMgr.saveState();
       this.postState();
     }
-  }
-
-  private async handleSkillPromptIntent(
-    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
-    intent: ReturnType<typeof detectSkillPromptIntent>,
-    originalPrompt: string,
-  ): Promise<{ handled: boolean; nextPrompt?: string }> {
-    if (!intent) {
-      return { handled: false };
-    }
-
-    const skills = listHarnessSkills();
-
-    if (intent.type === "list-skills") {
-      session.transcript.push({ role: "user", content: originalPrompt });
-      session.transcript.push({
-        role: "assistant",
-        content: formatSkillListMessage(skills),
-      });
-      session.status = "Ready";
-      this.sessionMgr.autoTitle(session, originalPrompt);
-      this.updateBoundTitles(session.id);
-      this.sessionMgr.touchSession(session);
-      await this.sessionMgr.saveState();
-      this.postState();
-      return { handled: true };
-    }
-
-    if (intent.type === "check-skill") {
-      const skill = resolveSkillByIntent(skills, intent.skillId);
-      session.transcript.push({ role: "user", content: originalPrompt });
-      session.transcript.push({
-        role: "assistant",
-        content: formatSkillAvailabilityMessage(skill, intent.skillId),
-      });
-      session.status = "Ready";
-      this.sessionMgr.autoTitle(session, originalPrompt);
-      this.updateBoundTitles(session.id);
-      this.sessionMgr.touchSession(session);
-      await this.sessionMgr.saveState();
-      this.postState();
-      return { handled: true };
-    }
-
-    if (intent.type === "activate-skill") {
-      const skill = resolveSkillByIntent(skills, intent.skillId);
-      if (!skill) {
-        session.transcript.push({ role: "user", content: originalPrompt });
-        session.transcript.push({
-          role: "assistant",
-          content: formatSkillAvailabilityMessage(undefined, intent.skillId),
-        });
-        session.status = "Ready";
-        this.sessionMgr.autoTitle(session, originalPrompt);
-        this.updateBoundTitles(session.id);
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return { handled: true };
-      }
-
-      activateSessionSkill(session, skill, intent.remainder || undefined);
-      if (!intent.remainder) {
-        session.status = formatActiveSkillsStatus(session.activeSkills);
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-        return { handled: true };
-      }
-
-      return { handled: false, nextPrompt: intent.remainder };
-    }
-
-    return { handled: false };
   }
 
   private getSlashCommandDeps(): SlashCommandDeps {
@@ -1103,6 +1011,26 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     return runtime.execute(session, tc);
   }
 
+  private async applyToolApprovalDecision(
+    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
+    tc: import("./types").ToolCall,
+    approved: boolean,
+  ) {
+    if (approved) {
+      tc.status = "approved";
+      try {
+        const result = await this.executeApprovedToolCall(session, tc);
+        applyExecutedToolCallResult(tc, session.transcript, result);
+      } catch (error) {
+        applyErroredToolCallResult(tc, session.transcript, error);
+      }
+      return;
+    }
+
+    clearPendingToolState(session, tc.id);
+    applyRejectedToolCallResult(tc, session.transcript);
+  }
+
   private async handleToolApproval(
     sessionId: string,
     toolCallId: string,
@@ -1111,54 +1039,23 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     const session = this.sessionMgr.requireSession(sessionId);
     if (!session) return;
 
-    for (const entry of session.transcript) {
-      if (!entry.toolCalls) continue;
-      for (const tc of entry.toolCalls) {
-        if (tc.id !== toolCallId) continue;
+    const resolved = findToolCallInTranscript(session.transcript, toolCallId);
+    if (!resolved) return;
 
-        // Clear inline diff decoration for this tool call
-        this.inlineDiffMgr.clearChange(toolCallId);
+    this.inlineDiffMgr.clearChange(toolCallId);
+    await this.applyToolApprovalDecision(session, resolved.toolCall, approved);
 
-        if (approved) {
-          tc.status = "approved";
-          try {
-            const result = await this.executeApprovedToolCall(session, tc);
-            tc.result = result;
-            tc.status = "executed";
-            session.transcript.push({ role: "tool", content: result });
-          } catch (error) {
-            tc.status = "error";
-            tc.result =
-              error instanceof Error
-                ? `Tool execution error: ${error.message}`
-                : "Tool execution error.";
-            session.transcript.push({ role: "tool", content: tc.result });
-          }
-        } else {
-          tc.status = "rejected";
-          clearPendingToolState(session, tc.id);
-          tc.result = "Edit rejected by user.";
-          session.transcript.push({
-            role: "tool",
-            content: "User rejected this change.",
-          });
-        }
+    this.sessionMgr.touchSession(session);
+    await this.sessionMgr.saveState();
+    this.postState();
 
-        this.sessionMgr.touchSession(session);
-        await this.sessionMgr.saveState();
-        this.postState();
-
-        const allResolved = entry.toolCalls!.every(
-          (t) =>
-            t.status === "executed" ||
-            t.status === "rejected" ||
-            t.status === "error",
-        );
-        if (allResolved && !session.busy) {
-          this.continueAfterToolResults(session);
-        }
-        return;
-      }
+    if (
+      shouldContinueAfterToolResolution(
+        resolved.entry.toolCalls,
+        session.busy,
+      )
+    ) {
+      this.continueAfterToolResults(session);
     }
   }
 
@@ -1176,31 +1073,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       if (!entry.toolCalls) continue;
       for (const tc of entry.toolCalls) {
         if (tc.status !== "pending") continue;
-
-        if (approved) {
-          tc.status = "approved";
-          try {
-            const result = await this.executeApprovedToolCall(session, tc);
-            tc.result = result;
-            tc.status = "executed";
-            session.transcript.push({ role: "tool", content: result });
-          } catch (error) {
-            tc.status = "error";
-            tc.result =
-              error instanceof Error
-                ? `Tool execution error: ${error.message}`
-                : "Tool execution error.";
-            session.transcript.push({ role: "tool", content: tc.result });
-          }
-        } else {
-          tc.status = "rejected";
-          clearPendingToolState(session, tc.id);
-          tc.result = "Edit rejected by user.";
-          session.transcript.push({
-            role: "tool",
-            content: "User rejected this change.",
-          });
-        }
+        await this.applyToolApprovalDecision(session, tc, approved);
       }
     }
 
@@ -1224,29 +1097,22 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
     try {
       loopResult = await runToolLoop(session, this.getToolLoopDeps());
-      if (loopResult.stoppedBecause !== "pending_approval") {
-        session.status = "Ready";
-      }
+      session.status =
+        getPostLoopReadyStatus(loopResult.stoppedBecause) ?? session.status;
     } catch (error) {
       if ((error as Error).name === "AbortError") {
-        session.status = "Cancelled.";
-        session.transcript.push({
-          role: "assistant",
-          content: "_Request cancelled._",
-        });
+        const outcome = buildCancelledLoopOutcome();
+        session.status = outcome.status;
+        session.transcript.push(outcome.transcriptEntry);
       } else {
-        const message =
-          error instanceof Error ? error.message : "Request failed.";
-        session.status = message;
-        session.transcript.push({
-          role: "assistant",
-          content: `**Error:** ${message}`,
-        });
+        const outcome = buildFailedLoopOutcome(error);
+        session.status = outcome.status;
+        session.transcript.push(outcome.transcriptEntry);
       }
     } finally {
       session.busy = false;
       session.currentRequest = undefined;
-      if (loopResult?.stoppedBecause !== "pending_approval") {
+      if (shouldFinalizeCompletedLoop(loopResult?.stoppedBecause)) {
         clearSessionSkills(session);
         this.notifyCompletion(session);
       }
@@ -1270,29 +1136,44 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   /* ── Session helpers ── */
 
   private syncSessionEndpointSelections() {
-    let changed = false;
-    const activeEndpointUrl = this.endpointMgr.activeEndpointUrl;
-    for (const session of this.sessionMgr.sessions.values()) {
-      if (session.selectedEndpoint === activeEndpointUrl) continue;
-      session.selectedEndpoint = activeEndpointUrl;
-      changed = true;
-    }
-    return changed;
+    return syncSessionsToActiveEndpoint(
+      this.sessionMgr.sessions.values(),
+      this.endpointMgr.activeEndpointUrl,
+    );
   }
 
   private createSessionForPanel(panel: vscode.WebviewPanel): string {
     const session = this.sessionMgr.createSession(this.endpointMgr.models);
     session.selectedEndpoint = this.endpointMgr.activeEndpointUrl;
-    this.panelSessions.set(panel, session.id);
+    bindPanelToSession(
+      this.panelSessions,
+      panel,
+      session.id,
+      this.sessionMgr.sessions.keys(),
+    );
     panel.title = this.getPanelTitle(session.id);
     this.postState();
     return session.id;
   }
 
   private switchPanelSession(panel: vscode.WebviewPanel, sessionId: string) {
-    if (!this.sessionMgr.sessions.has(sessionId)) return;
-    this.panelSessions.set(panel, sessionId);
-    panel.title = this.getPanelTitle(sessionId);
+    const currentSessionId = this.panelSessions.get(panel) ?? "";
+    const resolvedSessionId = resolveExistingSessionId(
+      sessionId,
+      this.sessionMgr.sessions.keys(),
+      currentSessionId,
+    );
+    if (
+      !bindPanelToSession(
+        this.panelSessions,
+        panel,
+        resolvedSessionId,
+        this.sessionMgr.sessions.keys(),
+      )
+    ) {
+      return;
+    }
+    panel.title = this.getPanelTitle(resolvedSessionId);
     void this.sessionMgr.saveState();
     this.postState();
   }
@@ -1308,11 +1189,12 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       void this.sessionMgr.saveState();
     }
 
-    for (const [panel, pSessionId] of this.panelSessions.entries()) {
-      if (pSessionId === sessionId) {
-        this.panelSessions.set(panel, fallbackId);
-        panel.title = this.getPanelTitle(fallbackId);
-      }
+    for (const panel of rebindDeletedSessionPanels(
+      this.panelSessions,
+      sessionId,
+      fallbackId,
+    )) {
+      panel.title = this.getPanelTitle(fallbackId);
     }
     this.postState();
   }
@@ -1353,8 +1235,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   }
 
   private updateBoundTitles(sessionId: string) {
-    for (const [panel, pId] of this.panelSessions.entries()) {
-      if (pId === sessionId) panel.title = this.getPanelTitle(sessionId);
+    for (const panel of getPanelsBoundToSession(this.panelSessions, sessionId)) {
+      panel.title = this.getPanelTitle(sessionId);
     }
   }
 
