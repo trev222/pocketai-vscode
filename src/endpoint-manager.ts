@@ -60,25 +60,40 @@ export class EndpointManager {
   activeEndpointUrl = "";
   models: string[] = [];
   statusSummary = "status unavailable";
+  private managedEndpointMap = new Map<string, EndpointConfig>();
   private healthCheckTimer?: ReturnType<typeof setInterval>;
   private statusBarItem?: vscode.StatusBarItem;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
+
+  private resolveCurrentActiveEndpoint(): {
+    url: string;
+    config: EndpointConfig;
+  } {
+    const endpoints = this.getEndpoints();
+    const normalizedActive = normalizeBaseUrl(this.activeEndpointUrl);
+    const match = endpoints.find(
+      (ep) => normalizeBaseUrl(ep.url) === normalizedActive,
+    );
+    const config =
+      match ??
+      endpoints[0] ?? { name: "Local PocketAI", url: LOCAL_POCKETAI_URL };
+
+    return {
+      url: normalizeBaseUrl(config.url),
+      config,
+    };
+  }
 
   get config() {
     return vscode.workspace.getConfiguration("pocketai");
   }
 
   get baseUrl() {
-    return (
-      this.activeEndpointUrl ||
-      normalizeBaseUrl(
-        this.config.get<string>("baseUrl") ?? LOCAL_POCKETAI_URL,
-      )
-    );
+    return this.resolveCurrentActiveEndpoint().url;
   }
 
-  getEndpoints(): EndpointConfig[] {
+  getConfiguredEndpoints(): EndpointConfig[] {
     const endpoints = this.config.get<EndpointConfig[]>("endpoints") ?? [];
     if (endpoints.length) return endpoints;
     const legacy = (
@@ -87,15 +102,56 @@ export class EndpointManager {
     return [{ name: "Local PocketAI", url: legacy }];
   }
 
+  getEndpoints(): EndpointConfig[] {
+    const configured = this.getConfiguredEndpoints();
+    const merged = configured.slice();
+    const configuredUrls = new Set(
+      configured.map((endpoint) => normalizeBaseUrl(endpoint.url)),
+    );
+
+    for (const endpoint of this.managedEndpointMap.values()) {
+      const url = normalizeBaseUrl(endpoint.url);
+      if (!configuredUrls.has(url)) {
+        merged.push(endpoint);
+      }
+    }
+
+    return merged;
+  }
+
+  setManagedEndpoints(endpoints: EndpointConfig[]): boolean {
+    const next = new Map<string, EndpointConfig>();
+    for (const endpoint of endpoints) {
+      next.set(normalizeBaseUrl(endpoint.url), endpoint);
+    }
+
+    const serialize = (map: Map<string, EndpointConfig>) =>
+      JSON.stringify(
+        Array.from(map.entries())
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([url, endpoint]) => ({
+            url,
+            name: endpoint.name,
+            apiKey: endpoint.apiKey ?? "",
+            deviceId: endpoint.deviceId ?? "",
+            subdomain: endpoint.subdomain ?? "",
+          })),
+      );
+
+    if (serialize(next) === serialize(this.managedEndpointMap)) {
+      return false;
+    }
+
+    this.managedEndpointMap = next;
+    return true;
+  }
+
   getActiveEndpointConfig(): EndpointConfig {
-    const endpoints = this.getEndpoints();
-    const match = endpoints.find(
-      (ep) => normalizeBaseUrl(ep.url) === this.activeEndpointUrl,
-    );
-    return (
-      match ??
-      endpoints[0] ?? { name: "Local PocketAI", url: LOCAL_POCKETAI_URL }
-    );
+    return this.resolveCurrentActiveEndpoint().config;
+  }
+
+  getResolvedActiveEndpointUrl(): string {
+    return this.resolveCurrentActiveEndpoint().url;
   }
 
   getEndpointCapabilities(endpointUrl: string): EndpointCapabilities {
@@ -105,7 +161,7 @@ export class EndpointManager {
   }
 
   getActiveEndpointCapabilities(): EndpointCapabilities {
-    return this.getEndpointCapabilities(this.baseUrl);
+    return this.getEndpointCapabilities(this.getResolvedActiveEndpointUrl());
   }
 
   initEndpoints() {
@@ -138,13 +194,22 @@ export class EndpointManager {
     }
   }
 
-  startHealthChecks(postState: () => void, pushSettingsState: () => void) {
+  startHealthChecks(
+    syncManagedEndpoints: () => Promise<void>,
+    postState: () => void,
+    pushSettingsState: () => void,
+    onActiveEndpointRecovered?: () => Promise<void> | void,
+  ) {
     if (this.healthCheckTimer) {
       clearInterval(this.healthCheckTimer);
       this.healthCheckTimer = undefined;
     }
 
     const check = async () => {
+      await syncManagedEndpoints();
+      this.initEndpoints();
+      const previousActiveHealthy =
+        this.endpointHealthMap.get(this.getResolvedActiveEndpointUrl())?.healthy ?? false;
       const endpoints = this.getEndpoints();
       const currentUrls = new Set<string>();
       for (const ep of endpoints) {
@@ -174,9 +239,19 @@ export class EndpointManager {
             headers: { Authorization: `Bearer ${apiKey}` },
             signal: AbortSignal.timeout(5000),
           });
-          health.healthy = resp.ok;
-          health.latencyMs = Date.now() - start;
-          health.error = resp.ok ? undefined : `HTTP ${resp.status}`;
+          if (resp.ok) {
+            health.healthy = true;
+            health.latencyMs = Date.now() - start;
+            health.error = undefined;
+          } else {
+            const statusResp = await fetch(`${health.url}/status`, {
+              headers: { Authorization: `Bearer ${apiKey}` },
+              signal: AbortSignal.timeout(5000),
+            });
+            health.healthy = statusResp.ok;
+            health.latencyMs = Date.now() - start;
+            health.error = statusResp.ok ? undefined : `HTTP ${resp.status}`;
+          }
         } catch (err) {
           health.healthy = false;
           health.latencyMs = undefined;
@@ -196,6 +271,11 @@ export class EndpointManager {
         if (health.healthy !== prevHealthy) changed = true;
       }
       this.updateStatusBar();
+      const nextActiveHealthy =
+        this.endpointHealthMap.get(this.getResolvedActiveEndpointUrl())?.healthy ?? false;
+      if (!previousActiveHealthy && nextActiveHealthy) {
+        await onActiveEndpointRecovered?.();
+      }
       // Only push state to webviews when health status actually changes,
       // to avoid unnecessary full re-renders that cause visible blinking.
       if (changed) {
@@ -216,36 +296,52 @@ export class EndpointManager {
       this.statusSummary = "checking...";
       const activeApiKey = this.getActiveEndpointConfig().apiKey || "local-pocketai";
       let foundModels: string[] = [];
+      let respondedSuccessfully = false;
+      let lastError: unknown;
 
       try {
         const response = await fetch(`${this.baseUrl}/v1/models`, {
           headers: { Authorization: `Bearer ${activeApiKey}` },
         });
-        const payload = (await response.json()) as ModelListResponse;
-        foundModels = Array.from(
-          new Set(
-            (payload.data ?? [])
-              .map((m) => m.id?.trim() ?? "")
-              .filter(Boolean),
-          ),
-        );
-      } catch {}
+        if (response.ok) {
+          respondedSuccessfully = true;
+          const payload = (await response.json()) as ModelListResponse;
+          foundModels = Array.from(
+            new Set(
+              (payload.data ?? [])
+                .map((m) => m.id?.trim() ?? "")
+                .filter(Boolean),
+            ),
+          );
+        } else {
+          this.statusSummary = `HTTP ${response.status}`;
+        }
+      } catch (error) {
+        lastError = error;
+      }
 
       if (!foundModels.length) {
         try {
           const response = await fetch(`${this.baseUrl}/api/tags`);
-          const payload = (await response.json()) as OllamaTagsResponse;
-          foundModels = Array.from(
-            new Set(
-              (payload.models ?? [])
-                .map((m) => (m.name || m.model || "").trim())
-                .filter(Boolean),
-            ),
-          );
-          if (foundModels.length) {
-            this.statusSummary = "Connected via Ollama";
+          if (response.ok) {
+            respondedSuccessfully = true;
+            const payload = (await response.json()) as OllamaTagsResponse;
+            foundModels = Array.from(
+              new Set(
+                (payload.models ?? [])
+                  .map((m) => (m.name || m.model || "").trim())
+                  .filter(Boolean),
+              ),
+            );
+            if (foundModels.length) {
+              this.statusSummary = "Connected via Ollama";
+            }
+          } else if (!respondedSuccessfully) {
+            this.statusSummary = `HTTP ${response.status}`;
           }
-        } catch {}
+        } catch (error) {
+          if (!lastError) lastError = error;
+        }
       }
 
       if (!foundModels.length) {
@@ -253,20 +349,37 @@ export class EndpointManager {
           const sr = await fetch(`${this.baseUrl}/status`, {
             headers: { Authorization: `Bearer ${activeApiKey}` },
           });
-          const sp = (await sr.json()) as StatusResponse;
-          this.statusSummary = JSON.stringify(sp);
-          if (sp.defaultModelId?.trim()) {
-            foundModels = [sp.defaultModelId.trim()];
+          if (sr.ok) {
+            respondedSuccessfully = true;
+            const sp = (await sr.json()) as StatusResponse;
+            this.statusSummary = JSON.stringify(sp);
+            if (sp.defaultModelId?.trim()) {
+              foundModels = [sp.defaultModelId.trim()];
+            }
+          } else if (!respondedSuccessfully) {
+            this.statusSummary = `HTTP ${sr.status}`;
           }
-        } catch {}
+        } catch (error) {
+          if (!lastError) lastError = error;
+        }
+      }
+
+      if (!respondedSuccessfully) {
+        throw (
+          lastError ??
+          new Error("Could not reach localhost. Is Ollama or PocketAI running?")
+        );
       }
 
       this.models = filterAndSortChatModels(foundModels);
 
-      const activeHealth = this.endpointHealthMap.get(this.activeEndpointUrl);
+      const activeHealth = this.endpointHealthMap.get(
+        this.getResolvedActiveEndpointUrl(),
+      );
       if (activeHealth) {
         activeHealth.healthy = true;
         activeHealth.lastChecked = Date.now();
+        activeHealth.error = undefined;
       }
 
       applyRefreshedModelsToSessions(
@@ -277,6 +390,8 @@ export class EndpointManager {
 
       if (this.models.length) {
         this.statusSummary = `OK — ${this.models.length} model(s)`;
+      } else if (!this.statusSummary || this.statusSummary === "checking...") {
+        this.statusSummary = "Server reachable, but no models found.";
       }
     } catch (error) {
       this.models = [];
@@ -289,10 +404,13 @@ export class EndpointManager {
       for (const session of sessions.values()) {
         session.status = message;
       }
-      const activeHealth = this.endpointHealthMap.get(this.activeEndpointUrl);
+      const activeHealth = this.endpointHealthMap.get(
+        this.getResolvedActiveEndpointUrl(),
+      );
       if (activeHealth) {
         activeHealth.healthy = false;
         activeHealth.lastChecked = Date.now();
+        activeHealth.error = message;
       }
     }
     await saveState();
@@ -300,7 +418,18 @@ export class EndpointManager {
 
   switchEndpoint(endpointUrl: string) {
     const url = normalizeBaseUrl(endpointUrl);
-    if (!this.endpointHealthMap.has(url)) return;
+    const target = this.getEndpoints().find(
+      (endpoint) => normalizeBaseUrl(endpoint.url) === url,
+    );
+    if (!target) return;
+    if (!this.endpointHealthMap.has(url)) {
+      this.endpointHealthMap.set(url, {
+        name: target.name,
+        url,
+        healthy: false,
+        lastChecked: 0,
+      });
+    }
     this.activeEndpointUrl = url;
     void this.persistActiveEndpointUrl();
     this.updateStatusBar();
@@ -329,7 +458,8 @@ export class EndpointManager {
     sessions?: Map<string, ChatSession>,
   ) {
     if (!this.statusBarItem) return;
-    const health = this.endpointHealthMap.get(this.activeEndpointUrl);
+    const resolvedActiveEndpointUrl = this.getResolvedActiveEndpointUrl();
+    const health = this.endpointHealthMap.get(resolvedActiveEndpointUrl);
     const session = sidebarSessionId
       ? sessions?.get(sidebarSessionId)
       : undefined;

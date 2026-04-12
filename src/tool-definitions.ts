@@ -1,7 +1,7 @@
 /**
  * OpenAI-compatible function/tool definitions for structured tool calling.
- * Modeled after Claude Code's tool interface — detailed descriptions, full
- * parameter sets, and explicit usage guidance in each description.
+ * Designed for rich tool descriptions, full parameter sets, and explicit
+ * usage guidance in each definition.
  */
 
 export type OpenAITool = {

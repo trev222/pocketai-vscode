@@ -48,9 +48,12 @@ export class TerminalManager {
     cmd: string,
     cwd: string,
     timeout = 120000,
+    options?: { reveal?: boolean },
   ): Promise<{ output: string; exitCode: number | undefined }> {
     const terminal = this.ensureTerminal();
-    terminal.show(true); // Show terminal but don't take focus
+    if (options?.reveal) {
+      terminal.show(true);
+    }
 
     const shellIntegration = terminal.shellIntegration;
     if (shellIntegration) {
@@ -61,6 +64,12 @@ export class TerminalManager {
     const integration = await this.waitForShellIntegration(terminal, 3000);
     if (integration) {
       return this.executeWithShellIntegration(integration, cmd, cwd, timeout);
+    }
+
+    if (!options?.reveal) {
+      throw new Error(
+        "Shell integration is unavailable for hidden terminal execution.",
+      );
     }
 
     // Final fallback: just send text and return a notice

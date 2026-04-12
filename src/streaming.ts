@@ -278,6 +278,7 @@ export async function streamResponse(
 
     let chunkText = "";
     let finishReason = "";
+    let responseModel = "";
     let usageData:
       | { prompt_tokens?: number; completion_tokens?: number }
       | undefined;
@@ -313,6 +314,9 @@ export async function streamResponse(
               const parsed = JSON.parse(data);
               const delta = parsed.choices?.[0]?.delta?.content;
               const reason = parsed.choices?.[0]?.finish_reason;
+              if (typeof parsed.model === "string" && parsed.model.trim()) {
+                responseModel = parsed.model.trim();
+              }
               if (parsed.usage) usageData = parsed.usage;
               if (reason) finishReason = reason;
               if (delta) {
@@ -350,6 +354,7 @@ export async function streamResponse(
         type: "streamEnd",
         fullText: combinedText,
         tokenUsage,
+        responseModel: responseModel || undefined,
       });
       if (!combinedText) throw new Error("PocketAI returned an empty response.");
       return combinedText;
@@ -363,6 +368,7 @@ export async function streamResponse(
       type: "streamEnd",
       fullText: combinedText,
       tokenUsage,
+      responseModel: responseModel || undefined,
     });
 
     const likelyTruncated = finishReason === "length";
@@ -435,6 +441,8 @@ export async function streamResponseWithTools(
 
   let contentText = "";
   let finishReason = "";
+  let responseModel = "";
+  let announcedStructuredToolMode = false;
   const toolCallAccum = new Map<
     number,
     { id: string; name: string; arguments: string }
@@ -474,6 +482,9 @@ export async function streamResponseWithTools(
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta;
             const reason = parsed.choices?.[0]?.finish_reason;
+            if (typeof parsed.model === "string" && parsed.model.trim()) {
+              responseModel = parsed.model.trim();
+            }
             if (parsed.usage) usageData = parsed.usage;
             if (reason) finishReason = reason;
 
@@ -488,6 +499,10 @@ export async function streamResponseWithTools(
 
             // Accumulate tool_calls deltas
             if (delta?.tool_calls) {
+              if (!announcedStructuredToolMode) {
+                announcedStructuredToolMode = true;
+                deps.broadcastToWebviews({ type: "streamToolCallDetected" });
+              }
               for (const tc of delta.tool_calls as RawToolCallDelta[]) {
                 const idx = tc.index;
                 if (!toolCallAccum.has(idx)) {
@@ -596,6 +611,7 @@ export async function streamResponseWithTools(
     type: "streamEnd",
     fullText: contentText,
     tokenUsage,
+    responseModel: responseModel || undefined,
   });
 
   // Convert accumulated tool calls to ToolCall objects
@@ -863,6 +879,25 @@ async function nonStreamingFallback(
   }
   const text = payload.choices?.[0]?.message?.content?.trim();
   if (!text) throw new Error("Empty response.");
-  deps.broadcastToWebviews({ type: "streamEnd", fullText: text });
+  const tokenUsage = payload.usage
+    ? {
+        promptTokens: payload.usage.prompt_tokens ?? 0,
+        completionTokens: payload.usage.completion_tokens ?? 0,
+      }
+    : undefined;
+  if (tokenUsage) {
+    session.lastTokenUsage = tokenUsage;
+    session.cumulativeTokens.prompt += tokenUsage.promptTokens;
+    session.cumulativeTokens.completion += tokenUsage.completionTokens;
+  }
+  deps.broadcastToWebviews({
+    type: "streamEnd",
+    fullText: text,
+    tokenUsage,
+    responseModel:
+      typeof payload.model === "string" && payload.model.trim()
+        ? payload.model.trim()
+        : undefined,
+  });
   return text;
 }

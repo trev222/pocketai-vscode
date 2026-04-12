@@ -110,7 +110,45 @@ export type PromptPreparationResult =
   | {
       kind: "ready";
       prompt: string;
+      transientSystemPrompt?: string;
     };
+
+const LOCAL_CLOCK_VERIFICATION_COMMAND =
+  "date '+%Y-%m-%d %H:%M:%S %Z (%A)'";
+
+export function buildTransientSystemPromptForPrompt(
+  prompt: string,
+): string | undefined {
+  const trimmed = prompt.trim();
+  if (!trimmed) return undefined;
+
+  const normalized = trimmed
+    .toLowerCase()
+    .replace(/[?!.,]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const shouldVerifyLocally = [
+    /^(?:what(?:'s| is)?\s+)?time(?:\s+is it)?(?:\s+right now)?$/,
+    /^(?:tell me|can you tell me|could you tell me)\s+(?:the\s+)?time(?:\s+right now)?$/,
+    /^(?:what(?:'s| is)?\s+)?(?:today'?s\s+)?date(?:\s+is it)?$/,
+    /^(?:what(?:'s| is)?\s+)?what day is it(?:\s+today)?$/,
+    /^(?:what(?:'s| is)?\s+)?day(?:\s+is it)?(?:\s+today)?$/,
+    /^(?:tell me|can you tell me|could you tell me)\s+(?:today'?s\s+)?date$/,
+  ].some((matcher) => matcher.test(normalized));
+
+  if (!shouldVerifyLocally) {
+    return undefined;
+  }
+
+  return [
+    "[Verified Local Clock Request]",
+    "The user is asking for the current local system time, date, or day.",
+    "Before answering, you MUST verify it with a command and use that command output as the source of truth.",
+    `First emit exactly this tool call and wait for the result: @run_command: ${LOCAL_CLOCK_VERIFICATION_COMMAND}`,
+    "After the tool returns, answer the user's original request directly and concisely using the verified local result.",
+  ].join("\n");
+}
 
 export function preparePromptForSend(options: {
   session: ChatSession;
@@ -120,6 +158,7 @@ export function preparePromptForSend(options: {
   fallbackTitleNumber: number;
 }): PromptPreparationResult {
   let trimmed = options.prompt.trim();
+  const transientSystemPrompt = buildTransientSystemPromptForPrompt(trimmed);
 
   if (trimmed.startsWith("/")) {
     const parts = trimmed.split(/\s+/);
@@ -169,5 +208,6 @@ export function preparePromptForSend(options: {
   return {
     kind: "ready",
     prompt: trimmed,
+    transientSystemPrompt,
   };
 }

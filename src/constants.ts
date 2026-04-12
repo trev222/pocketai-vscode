@@ -2,6 +2,7 @@ import type { ToolCallType } from "./types";
 
 export const STORAGE_KEY = "pocketai_sessions_v2";
 export const DEFAULT_STATUS = "Waiting for PocketAI localhost server.";
+export const DEFAULT_SESSION_TITLE = "PocketAI Code";
 export const DEFAULT_MAX_TOKENS = 4096;
 export const DEFAULT_WORKSPACE_FILE_LIMIT = 200;
 export const DEFAULT_CURRENT_FILE_CHAR_LIMIT = 12000;

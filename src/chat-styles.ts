@@ -245,6 +245,19 @@ export function getChatStyles(): string {
     .session-menu-item:hover .delete-btn { opacity: 1; }
     .session-menu-item .delete-btn:hover { background: rgba(241,76,76,0.15); color: var(--error); }
     .session-menu-item .delete-btn:focus-visible { opacity: 1; }
+    .session-menu-item.delete-confirming .delete-btn {
+      opacity: 1;
+    }
+    .session-menu-item .delete-btn.confirm {
+      width: auto;
+      min-width: 58px;
+      padding: 0 8px;
+      background: rgba(241,76,76,0.15);
+      color: var(--error);
+      border: 1px solid rgba(241,76,76,0.28);
+      font-size: 11px;
+      font-weight: 600;
+    }
 
     .session-new-btn {
       width: 100%;
@@ -347,7 +360,6 @@ export function getChatStyles(): string {
     .msg-tool {
       background: rgba(78,201,176,0.06);
       border: 1px solid rgba(78,201,176,0.12);
-      font-family: var(--font-mono);
       font-size: 12px;
     }
 
@@ -541,11 +553,56 @@ export function getChatStyles(): string {
 
     .tool-call-result {
       padding: 6px 10px;
-      font-family: var(--font-mono);
       font-size: 11px;
       color: var(--fg-muted);
       border-top: 1px solid var(--border);
-      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+
+    .tool-details-shell {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .tool-details-summary {
+      color: var(--fg);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .tool-details-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.03);
+      color: var(--fg-muted);
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 1;
+    }
+
+    .tool-details-toggle:hover {
+      background: var(--hover-bg);
+      color: var(--fg);
+    }
+
+    .tool-details-content {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px;
+      background: rgba(0,0,0,0.12);
+    }
+
+    .msg-tool .tool-details-content {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--fg-muted);
     }
 
     .batch-actions {
@@ -633,6 +690,125 @@ export function getChatStyles(): string {
 
     .harness-pane.active {
       display: flex;
+    }
+
+    .approval-dock {
+      display: none;
+      padding: 8px 12px 0;
+      flex-shrink: 0;
+    }
+
+    .approval-dock.active {
+      display: block;
+    }
+
+    .approval-dock-shell {
+      border: 1px solid rgba(56,189,248,0.24);
+      border-radius: 12px;
+      background: linear-gradient(180deg, rgba(56,189,248,0.08), rgba(56,189,248,0.03));
+      padding: 10px 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.16);
+    }
+
+    .approval-dock-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .approval-dock-title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .approval-dock-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .approval-dock-copy {
+      font-size: 13px;
+      color: var(--fg);
+    }
+
+    .approval-dock-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .approval-dock-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0 0;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .approval-dock-item:first-child {
+      padding-top: 0;
+      border-top: none;
+    }
+
+    .approval-dock-info {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex: 1;
+    }
+
+    .approval-dock-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .approval-dock-type {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--success);
+      font-weight: 600;
+      text-transform: lowercase;
+    }
+
+    .approval-dock-note {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      color: var(--fg-muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .approval-dock-path {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--fg-muted);
+    }
+
+    .approval-dock-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      flex-shrink: 0;
     }
 
     .harness-card {
@@ -767,6 +943,17 @@ export function getChatStyles(): string {
     .harness-task-row:first-child {
       padding-top: 0;
       border-top: none;
+    }
+
+    @media (max-width: 760px) {
+      .approval-dock-item {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .approval-dock-actions {
+        width: 100%;
+      }
     }
 
     .harness-task-actions {

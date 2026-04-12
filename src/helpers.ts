@@ -1,4 +1,5 @@
 import type { ToolCall } from "./types";
+import { DEFAULT_SESSION_TITLE } from "./constants";
 
 export function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -47,12 +48,12 @@ export function generateToolCallId() {
 }
 
 export function isDefaultSessionTitle(value: string) {
-  return /^Chat \d+$/.test(value);
+  return /^Chat \d+$/.test(value) || /^PocketAI Code(?: \d+)?$/.test(value);
 }
 
 export function summarizePrompt(prompt: string, fallbackNumber: number) {
   const compact = prompt.replace(/\s+/g, " ").trim();
-  if (!compact) return `Chat ${fallbackNumber}`;
+  if (!compact) return DEFAULT_SESSION_TITLE;
   return compact.length > 32 ? `${compact.slice(0, 32).trimEnd()}...` : compact;
 }
 

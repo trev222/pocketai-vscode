@@ -9,6 +9,7 @@ import type {
   ChatRole,
 } from "./types";
 import {
+  DEFAULT_SESSION_TITLE,
   STORAGE_KEY,
   DEFAULT_STATUS,
   DEFAULT_MAX_TOKENS,
@@ -24,6 +25,7 @@ import {
 } from "./session-persistence";
 import {
   buildSessionSummaries,
+  hasSessionStarted,
   resolveAutoSessionTitle,
   resolveRenamedSessionTitle,
   resolveSessionDeletion,
@@ -66,13 +68,19 @@ export class SessionManager {
   }
 
   async saveState() {
-    const sessions: PersistedChatSession[] = Array.from(this.sessions.values()).map(
+    const persistedSessions = Array.from(this.sessions.values()).filter((session) =>
+      hasSessionStarted(session.transcript),
+    );
+    const sessions: PersistedChatSession[] = persistedSessions.map(
       serializeSessionForPersistence,
     );
+    const sidebarSessionId = persistedSessions.length
+      ? resolveSidebarSessionId(this.sidebarSessionId, persistedSessions)
+      : "";
 
     await this.context.workspaceState.update(STORAGE_KEY, {
       sessions,
-      sidebarSessionId: this.sidebarSessionId,
+      sidebarSessionId,
       nextSessionNumber: this.nextSessionNumber,
       lastSelectedModel: this.lastSelectedModel,
     } satisfies PersistedState);
@@ -81,7 +89,7 @@ export class SessionManager {
   createSession(models: string[]): ChatSession {
     const session: ChatSession = {
       id: createId(),
-      title: `Chat ${this.nextSessionNumber}`,
+      title: DEFAULT_SESSION_TITLE,
       transcript: [],
       selectedModel: "",
       selectedReasoningEffort: "",
@@ -89,7 +97,7 @@ export class SessionManager {
       status: DEFAULT_STATUS,
       updatedAt: Date.now(),
       busy: false,
-      mode: "ask" as InteractionMode,
+      mode: "auto" as InteractionMode,
       checkpoints: [],
       cumulativeTokens: { prompt: 0, completion: 0 },
       activeSkills: [],
@@ -103,7 +111,6 @@ export class SessionManager {
     }
 
     this.sessions.set(session.id, session);
-    void this.saveState();
     return session;
   }
 

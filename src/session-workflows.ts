@@ -1,5 +1,5 @@
 import { isDefaultSessionTitle, summarizePrompt } from "./helpers";
-import type { ChatSession, SessionSummary } from "./types";
+import type { ChatEntry, ChatSession, SessionSummary } from "./types";
 
 type SessionRecencyLike = {
   id: string;
@@ -11,13 +11,19 @@ export function sortSessionsByRecency<T extends SessionRecencyLike>(sessions: T[
 }
 
 export function buildSessionSummaries(
-  sessions: Array<Pick<ChatSession, "id" | "title" | "updatedAt">>,
+  sessions: Array<Pick<ChatSession, "id" | "title" | "updatedAt" | "transcript">>,
 ): SessionSummary[] {
-  return sortSessionsByRecency(sessions).map((session) => ({
-    id: session.id,
-    title: session.title,
-    updatedAt: session.updatedAt,
-  }));
+  return sortSessionsByRecency(sessions)
+    .filter((session) => hasSessionStarted(session.transcript))
+    .map((session) => ({
+      id: session.id,
+      title: session.title,
+      updatedAt: session.updatedAt,
+    }));
+}
+
+export function hasSessionStarted(transcript: ChatEntry[]): boolean {
+  return transcript.some((entry) => entry.role === "user");
 }
 
 export function resolveSidebarSessionId(

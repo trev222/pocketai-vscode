@@ -10,7 +10,7 @@ import * as vscode from "vscode";
  * sessions and conversations, allowing the model to recall context about
  * the user, project, and past decisions.
  *
- * Memory types (modeled after Claude Code):
+ * Memory types used by PocketAI:
  *   - user:      Info about the user's role, preferences, expertise
  *   - feedback:   Corrections or guidance the user has given
  *   - project:   Ongoing work, goals, decisions not derivable from code

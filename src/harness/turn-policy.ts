@@ -60,3 +60,9 @@ export function canRecoverReadLoop(
 export function canCompactForContextRecovery(loopState: HarnessLoopSnapshot) {
   return loopState.contextCompactions < 2;
 }
+
+export function shouldSurfaceRetryErrorInTranscript(
+  classification: HarnessErrorClassification,
+) {
+  return classification.kind !== "transient";
+}

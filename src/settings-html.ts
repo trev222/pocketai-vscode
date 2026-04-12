@@ -579,6 +579,7 @@ export function getSettingsHtml(): string {
     for (const ep of state.endpoints) {
       const isActive = ep.url === state.activeEndpoint;
       const isProtectedEndpoint = ep.providerKind === "local-pocketai";
+      const isManagedEndpoint = !!ep.managed;
       const card = document.createElement("div");
       card.className = "endpoint-card" + (isActive ? " active" : "");
 
@@ -608,19 +609,22 @@ export function getSettingsHtml(): string {
           (ep.healthy ? "Connected" : "Unreachable") +
           (latency ? " &middot; " + latency : "") +
         '</div>' +
+        (isManagedEndpoint
+          ? '<div class="endpoint-status-text" style="margin-top:6px;font-size:12px;opacity:0.8">Managed by the PocketAI app.</div>'
+          : '') +
         '<div class="endpoint-actions">' +
           (isActive ? '<button disabled style="opacity:0.5">Active</button>' : '<button class="use-btn">Use</button>') +
-          (isProtectedEndpoint ? '' : '<button class="remove-btn">Remove</button>') +
+          (isProtectedEndpoint || isManagedEndpoint ? '' : '<button class="remove-btn">Remove</button>') +
         '</div>' +
         '<div class="refresh-row">' +
           '<button class="refresh-btn">&#8635; Refresh Models</button>' +
         '</div>' +
-        '<div class="endpoint-settings">' +
+        (isManagedEndpoint ? '' : '<div class="endpoint-settings">' +
           '<div class="setting-row">' +
             '<span class="setting-label">API Key</span>' +
             '<input type="password" class="ep-api-key" value="' + escapeHtml(epApiKey) + '" placeholder="Leave empty for local servers" />' +
           '</div>' +
-        '</div>';
+        '</div>');
 
       card.appendChild(body);
 
@@ -689,9 +693,12 @@ export function getSettingsHtml(): string {
       });
 
       // Settings change handlers
-      body.querySelector(".ep-api-key").addEventListener("change", (e) => {
-        vscode.postMessage({ type: "updateEndpointSetting", url: ep.url, key: "apiKey", value: e.target.value });
-      });
+      const apiKeyInput = body.querySelector(".ep-api-key");
+      if (apiKeyInput) {
+        apiKeyInput.addEventListener("change", (e) => {
+          vscode.postMessage({ type: "updateEndpointSetting", url: ep.url, key: "apiKey", value: e.target.value });
+        });
+      }
 
       endpointsList.appendChild(card);
     }

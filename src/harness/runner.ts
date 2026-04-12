@@ -10,6 +10,7 @@ import {
   canRecoverReadLoop,
   canRecoverRepeatedToolLoop,
   classifyHarnessError,
+  shouldSurfaceRetryErrorInTranscript,
 } from "./turn-policy";
 import { createHarnessToolRegistry } from "./tools/registry";
 import type {
@@ -218,20 +219,22 @@ export class HarnessRunner {
       `⚠ Tool loop error (attempt ${this.loopState.consecutiveModelErrors.count}/${this.loopState.consecutiveModelErrors.maxRetries}): ${message}`,
     );
 
-    if (session.transcript.length > 0) {
+    if (
+      session.transcript.length > 0 &&
+      shouldSurfaceRetryErrorInTranscript(classification)
+    ) {
       session.transcript.push({
         role: "tool",
         content: `[Error: ${message}. Retrying...]`,
       });
-      session.status =
-        classification.kind === "transient"
-          ? "Retrying after transient model/server issue..."
-          : "Retrying...";
-      this.deps.postState();
-      return true;
     }
 
-    return false;
+    session.status =
+      classification.kind === "transient"
+        ? "Retrying after transient model/server issue..."
+        : "Retrying...";
+    this.deps.postState();
+    return true;
   }
 
   private detectRepeatedToolCalls(

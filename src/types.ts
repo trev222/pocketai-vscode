@@ -158,6 +158,11 @@ export type EndpointConfig = {
   maxTokens?: number;
   systemPrompt?: string;
   apiKey?: string;
+  managed?: boolean;
+  managedSource?: string;
+  deviceId?: string;
+  subdomain?: string;
+  remoteUrl?: string;
 };
 
 export type EndpointHealth = {
@@ -268,12 +273,13 @@ export type OllamaTagsResponse = {
 };
 
 export type ChatCompletionResponse = {
+  model?: string;
   choices?: Array<{
     message?: { content?: string };
     finish_reason?: string;
   }>;
   error?: { message?: string };
-  usage?: { completion_tokens?: number };
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 };
 
 export type WebviewToExtensionMessage =
@@ -330,6 +336,7 @@ export type ExtensionToWebviewMessage = {
   busy: boolean;
   sessions: SessionSummary[];
   activeSessionId: string;
+  activeSessionTitle: string;
   mode: InteractionMode;
   diagnostics: RuntimeDiagnostics;
   projectInstructionsLoaded: boolean;
@@ -345,9 +352,12 @@ export type ExtensionToWebviewMessage = {
   type: "streamChunk";
   text: string;
 } | {
+  type: "streamToolCallDetected";
+} | {
   type: "streamEnd";
   fullText: string;
   tokenUsage?: { promptTokens: number; completionTokens: number };
+  responseModel?: string;
 } | {
   type: "filteredSessions";
   sessions: SessionSummary[];

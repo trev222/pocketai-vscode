@@ -651,7 +651,9 @@ export async function executeToolCall(
       if (useTerminal) {
         try {
           const { output: termOutput, exitCode } =
-            await terminalMgr.executeCommand(cmd, rootPath);
+            await terminalMgr.executeCommand(cmd, rootPath, timeoutMs, {
+              reveal: false,
+            });
           const output =
             termOutput.length > 10000
               ? termOutput.slice(0, 10000) + "\n... [truncated]"
@@ -661,7 +663,9 @@ export async function executeToolCall(
           }
           return `Command: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
         } catch (e) {
-          return `Command failed: \`${cmd}\`\n\`\`\`\n${(e as Error).message}\n\`\`\``;
+          outputChannel.appendLine(
+            `⚠ Terminal execution unavailable, falling back to captured process for: ${cmd}`,
+          );
         }
       }
 

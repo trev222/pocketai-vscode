@@ -44,6 +44,7 @@ const {
   canRecoverRepeatedToolLoop,
   canRecoverReadLoop,
   canCompactForContextRecovery,
+  shouldSurfaceRetryErrorInTranscript,
 } = require("../dist/harness/turn-policy.js");
 const {
   getEndpointProviderKind,
@@ -71,6 +72,7 @@ const {
 } = require("../dist/slash-command-utils.js");
 const {
   buildSessionSummaries,
+  hasSessionStarted,
   normalizeRenamedSessionTitle,
   resolveAutoSessionTitle,
   resolveRenamedSessionTitle,
@@ -115,6 +117,7 @@ const {
 const {
   applySlashSkillShortcut,
   beginPromptTurn,
+  buildTransientSystemPromptForPrompt,
   ensureSelectedModelForPrompt,
   NO_MODEL_SELECTED_STATUS,
   preparePromptForSend,
@@ -137,11 +140,17 @@ const {
   resolveExistingSessionId,
   shouldPersistStartupState,
 } = require("../dist/startup-workflows.js");
+const {
+  buildPocketAiRemoteEndpoint,
+} = require("../dist/pocketai-remote-devices.js");
+const {
+  getChatScript,
+} = require("../dist/chat-script.js");
 
 function createSession(overrides = {}) {
   return {
     id: "session-1",
-    title: "Chat 1",
+    title: "PocketAI Code",
     transcript: [],
     selectedModel: "model-a",
     selectedReasoningEffort: "",
@@ -740,6 +749,20 @@ test("turn policy classifies errors and recovery limits correctly", () => {
   assert.equal(canRecoverRepeatedToolLoop(baseLoopState), false);
   assert.equal(canRecoverReadLoop(baseLoopState, "src/a.ts"), false);
   assert.equal(canCompactForContextRecovery(baseLoopState), false);
+  assert.equal(
+    shouldSurfaceRetryErrorInTranscript({
+      kind: "transient",
+      message: "fetch failed",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSurfaceRetryErrorInTranscript({
+      kind: "generic",
+      message: "something else",
+    }),
+    true,
+  );
 });
 
 test("provider capabilities and chat controls honor provider kind and codex reasoning", () => {
@@ -1067,6 +1090,10 @@ test("session workflow helpers normalize titles and auto-title only default chat
     "Implement a compact harness pane...",
   );
   assert.equal(
+    resolveAutoSessionTitle("PocketAI Code", "Implement a compact harness panel for jobs", 7),
+    "Implement a compact harness pane...",
+  );
+  assert.equal(
     resolveAutoSessionTitle("Codex migration notes", "Implement a compact harness panel", 7),
     undefined,
   );
@@ -1074,9 +1101,9 @@ test("session workflow helpers normalize titles and auto-title only default chat
 
 test("session workflow helpers keep sidebar and deletion fallback aligned to recency", () => {
   const sessions = [
-    { id: "older", updatedAt: 10, title: "Older" },
-    { id: "newer", updatedAt: 30, title: "Newer" },
-    { id: "middle", updatedAt: 20, title: "Middle" },
+    { id: "older", updatedAt: 10, title: "Older", transcript: [{ role: "user", content: "older" }] },
+    { id: "newer", updatedAt: 30, title: "Newer", transcript: [{ role: "user", content: "newer" }] },
+    { id: "middle", updatedAt: 20, title: "Middle", transcript: [{ role: "user", content: "middle" }] },
   ];
 
   assert.deepEqual(
@@ -1103,6 +1130,25 @@ test("session workflow helpers keep sidebar and deletion fallback aligned to rec
       fallbackSessionId: "middle",
       nextSidebarSessionId: "older",
     },
+  );
+});
+
+test("session workflow helpers treat empty drafts as not started", () => {
+  assert.equal(hasSessionStarted([]), false);
+  assert.equal(
+    hasSessionStarted([{ role: "assistant", content: "hello" }]),
+    false,
+  );
+  assert.equal(
+    hasSessionStarted([{ role: "user", content: "hello" }]),
+    true,
+  );
+  assert.deepEqual(
+    buildSessionSummaries([
+      { id: "draft", title: "PocketAI Code", updatedAt: 20, transcript: [] },
+      { id: "started", title: "Started", updatedAt: 10, transcript: [{ role: "user", content: "hi" }] },
+    ]).map((session) => session.id),
+    ["started"],
   );
 });
 
@@ -1508,10 +1554,9 @@ test("prompt workflow helper composes slash skill, local skill intent, auto-rout
     preferredModel: "gpt-5.4",
     fallbackTitleNumber: 1,
   });
-  assert.deepEqual(slashSkillResult, {
-    kind: "ready",
-    prompt: "inspect this crash",
-  });
+  assert.equal(slashSkillResult.kind, "ready");
+  assert.equal(slashSkillResult.prompt, "inspect this crash");
+  assert.equal(slashSkillResult.transientSystemPrompt, undefined);
   assert.equal(slashSkillSession.selectedModel, "gpt-5.4");
   assert.equal(slashSkillSession.activeSkills[0].id, "debug");
 
@@ -1538,10 +1583,9 @@ test("prompt workflow helper composes slash skill, local skill intent, auto-rout
     preferredModel: "gpt-5.4-mini",
     fallbackTitleNumber: 3,
   });
-  assert.deepEqual(autoRouteResult, {
-    kind: "ready",
-    prompt: "please investigate why this is failing",
-  });
+  assert.equal(autoRouteResult.kind, "ready");
+  assert.equal(autoRouteResult.prompt, "please investigate why this is failing");
+  assert.equal(autoRouteResult.transientSystemPrompt, undefined);
   assert.equal(autoRouteSession.selectedModel, "gpt-5.4-mini");
   assert.equal(autoRouteSession.activeSkills[0].id, "investigate");
 
@@ -1555,6 +1599,35 @@ test("prompt workflow helper composes slash skill, local skill intent, auto-rout
   });
   assert.deepEqual(blockedResult, { kind: "blocked" });
   assert.equal(blockedSession.status, NO_MODEL_SELECTED_STATUS);
+
+  const clockPromptResult = preparePromptForSend({
+    session: createSession({ selectedModel: "", activeSkills: [] }),
+    prompt: "what time is it",
+    availableSkills: skills,
+    preferredModel: "gpt-5.4",
+    fallbackTitleNumber: 5,
+  });
+  assert.equal(clockPromptResult.kind, "ready");
+  assert.match(clockPromptResult.transientSystemPrompt || "", /@run_command:\s+date /);
+});
+
+test("prompt workflow helper only injects local clock verification for narrow local time/date prompts", () => {
+  assert.match(
+    buildTransientSystemPromptForPrompt("what time is it") || "",
+    /Verified Local Clock Request/,
+  );
+  assert.match(
+    buildTransientSystemPromptForPrompt("what's today's date?") || "",
+    /@run_command:\s+date /,
+  );
+  assert.equal(
+    buildTransientSystemPromptForPrompt("what time is it in tokyo"),
+    undefined,
+  );
+  assert.equal(
+    buildTransientSystemPromptForPrompt("convert 4pm tokyo to new york time"),
+    undefined,
+  );
 });
 
 test("slash command workflow helpers handle common command flows and effects", () => {
@@ -1851,4 +1924,48 @@ test("startup workflow helpers compose restored sessions, endpoint normalization
     resolveExistingSessionId("missing", restoredSessions.map((session) => session.id), "session-b"),
     "session-b",
   );
+});
+
+test("remote PocketAI device endpoints are built as managed in-memory endpoints", () => {
+  const endpoint = buildPocketAiRemoteEndpoint({
+    id: "device-1",
+    name: "Office Mac",
+    subdomain: "office-mac",
+    url: "https://office-mac.pocketaihub.com/",
+    apiKey: "secret-key",
+    localPort: 39457,
+    status: "active",
+    lastSeenAt: null,
+  });
+
+  assert.deepEqual(endpoint, {
+    name: "Office Mac · office-mac",
+    url: "https://office-mac.pocketaihub.com",
+    apiKey: "secret-key",
+    managed: true,
+    managedSource: "pocketai-remote-device",
+    deviceId: "device-1",
+    subdomain: "office-mac",
+    remoteUrl: "https://office-mac.pocketaihub.com",
+  });
+
+  assert.equal(
+    buildPocketAiRemoteEndpoint({
+      id: "device-2",
+      name: "No Auth",
+      subdomain: "no-auth",
+      url: "https://no-auth.pocketaihub.com",
+      apiKey: "",
+      localPort: 39457,
+      status: "active",
+      lastSeenAt: null,
+    }),
+    null,
+  );
+});
+
+test("chat webview script emits valid JavaScript", () => {
+  assert.doesNotThrow(() => {
+    new Function(getChatScript("brand://icon"));
+  });
 });

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implement a Claude-Code-style agent harness inside PocketAI while keeping the current UI and overall feel largely unchanged.
+Implement a reusable agent harness inside PocketAI while keeping the current UI and overall feel largely unchanged.
 
 The main shift should be architectural, not visual:
 
@@ -14,26 +14,26 @@ The main shift should be architectural, not visual:
 
 This part is non-negotiable.
 
-- We may reuse or adapt open `claw-code` code where the license allows it.
+- We may reuse or adapt permissively licensed open-source code where the license allows it.
 - We may use public behavior, public docs, and our own observations as product requirements.
-- We should not copy leaked Claude Code source, prompts, tests, strings, schemas, or internal architecture directly.
-- If a Claude Code behavior is desirable, we should rewrite it as a clean-room requirement and implement it ourselves.
-- We should not use the leaked repository as a source-level implementation reference, even if it is easy to find. At most, it can inform black-box parity goals that we restate in our own words.
+- We should not copy non-public or restricted source, prompts, tests, strings, schemas, or internal architecture directly.
+- If an external tool behavior is desirable, we should restate it as a product requirement and implement it ourselves.
+- We should use public documentation and appropriately licensed references for source-level implementation guidance.
 - Every migrated subsystem should note its provenance in the PR description:
-  - `ported from open claw-code`
+  - `ported from open-source reference`
   - `adapted from existing PocketAI`
-  - `new clean-room implementation`
+  - `new implementation`
 
 Reference priority:
 
 1. existing PocketAI code
-2. open `claw-code`
+2. permissively licensed open-source references
 3. public product behavior and docs
-4. our own clean-room design
+4. our own design
 
 ## Behavioral Parity Priorities
 
-These are the highest-value areas for matching the Claude-Code-like feel without copying proprietary source:
+These are the highest-value areas for delivering a strong coding-agent feel without copying proprietary source:
 
 1. Tool registry and permission model
 2. Agent loop / turn runner / reasoning flow
@@ -381,7 +381,7 @@ Add fixture-based integration tests for:
 
 - write a short harness spec
 - write a provenance checklist
-- decide which `claw-code` modules can be reused directly
+- decide which open-source modules can be reused directly
 - add an experimental feature flag, for example `pocketai.experimentalHarness`
 - define the first-wave tool registry contract
 
@@ -464,13 +464,13 @@ Mitigation:
 
 Risk:
 
-- accidental copying from proprietary leaked material
+- accidental copying from non-public or restricted material
 
 Mitigation:
 
-- do not paste from leaked source
-- do not use leaked repos as implementation references
-- treat Claude Code only as a black-box behavior target
+- do not paste from restricted source material
+- do not use non-public repos as implementation references
+- treat external tools only as black-box behavior targets when needed
 - document provenance on every PR
 
 ### 5. Security Regressions

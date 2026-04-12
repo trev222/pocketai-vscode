@@ -301,13 +301,13 @@ export function estimateSessionTokens(
   config: vscode.WorkspaceConfiguration,
   projectInstructionsCache: string,
   activeSystemPrompt: string,
+  options: {
+    includeWorkspaceContext?: boolean;
+    includeReportedUsage?: boolean;
+  } = {},
 ): number {
-  if (session.lastTokenUsage) {
-    return (
-      session.lastTokenUsage.promptTokens +
-      session.lastTokenUsage.completionTokens
-    );
-  }
+  const includeWorkspaceContext = options.includeWorkspaceContext ?? false;
+  const includeReportedUsage = options.includeReportedUsage ?? true;
 
   let charCount = projectInstructionsCache.length;
   charCount += (
@@ -321,7 +321,17 @@ export function estimateSessionTokens(
       charCount += file.content.length;
     }
   }
-  if (config.get<boolean>("includeWorkspaceContext", true)) {
+
+  let estimatedTokens = Math.ceil(charCount / 4);
+  if (includeReportedUsage && session.lastTokenUsage) {
+    estimatedTokens = Math.max(
+      estimatedTokens,
+      session.lastTokenUsage.promptTokens +
+        session.lastTokenUsage.completionTokens,
+    );
+  }
+
+  if (includeWorkspaceContext && config.get<boolean>("includeWorkspaceContext", true)) {
     const charLimit =
       config.get<number>("currentFileCharLimit") ??
       DEFAULT_CURRENT_FILE_CHAR_LIMIT;
@@ -329,7 +339,7 @@ export function estimateSessionTokens(
       config.get<number>("workspaceFileLimit") ?? DEFAULT_WORKSPACE_FILE_LIMIT,
       200,
     );
-    charCount += fileCount * 50 + charLimit;
+    estimatedTokens += Math.ceil((fileCount * 50 + charLimit) / 4);
   }
-  return Math.ceil(charCount / 4);
+  return estimatedTokens;
 }

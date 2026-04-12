@@ -1,5 +1,6 @@
 import { getChatStyles } from "./chat-styles";
 import { getChatScript } from "./chat-script";
+import { DEFAULT_SESSION_TITLE } from "./constants";
 
 export function getChatHtml(nonce: string, cspSource: string, brandIconUri: string): string {
     return `<!DOCTYPE html>
@@ -23,9 +24,9 @@ export function getChatHtml(nonce: string, cspSource: string, brandIconUri: stri
         </div>
         <div class="session-title-wrap">
           <button class="session-title-btn" id="sessionTitleBtn" type="button" title="Rename chat">
-            <span id="sessionLabel">Chat 1</span>
+            <span id="sessionLabel">${DEFAULT_SESSION_TITLE}</span>
           </button>
-          <input class="session-title-input" id="sessionTitleInput" type="text" value="Chat 1" maxlength="120" aria-label="Chat title" />
+          <input class="session-title-input" id="sessionTitleInput" type="text" value="${DEFAULT_SESSION_TITLE}" maxlength="120" aria-label="Chat title" />
         </div>
         <div class="session-dropdown">
           <button class="session-trigger" id="sessionTrigger" type="button">
@@ -71,6 +72,9 @@ export function getChatHtml(nonce: string, cspSource: string, brandIconUri: stri
     <!-- Harness activity -->
     <div class="harness-pane" id="harnessPane" style="display:none"></div>
 
+    <!-- Approval dock -->
+    <div class="approval-dock" id="approvalDock" style="display:none"></div>
+
     <!-- Composer -->
     <div class="composer">
       <div class="composer-inner">
@@ -95,7 +99,7 @@ export function getChatHtml(nonce: string, cspSource: string, brandIconUri: stri
               </div>
               <div class="composer-menu" id="modeMenuWrap">
                 <button class="mode-trigger" id="modeTrigger" type="button" title="Change mode">
-                  <span class="mode-trigger-label" id="modeTriggerLabel">Ask</span>
+                  <span class="mode-trigger-label" id="modeTriggerLabel">Auto</span>
                   <span class="mode-trigger-icon">✎</span>
                 </button>
                 <div class="composer-popout" id="modeMenu">

@@ -45,17 +45,21 @@ export function getChatScript(brandIconUri: string): string {
     const tokenText = document.getElementById("tokenText");
     const tokenBarFill = document.getElementById("tokenBarFill");
     const harnessPane = document.getElementById("harnessPane");
+    const approvalDock = document.getElementById("approvalDock");
 
     let state = null;
     let isStreaming = false;
     let streamingText = "";
     let streamingEl = null;
+    let streamingToolMode = false;
     let streamStartTime = 0;
     let streamChunkCount = 0;
     const messageStats = new Map();
     let editingSessionId = "";
     let isEditingSessionTitle = false;
     let composerNoticeTimeout = null;
+    let pendingDeleteSessionId = "";
+    let visibleSessions = [];
 
     const TEXT_ATTACHMENT_EXTENSION_RE = /\.(txt|md|mdx|markdown|json|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|less|js|jsx|mjs|cjs|ts|tsx|py|rb|php|java|kt|go|rs|c|cc|cpp|cxx|h|hpp|cs|swift|sh|bash|zsh|fish|sql|graphql|gql|csv|tsv|log|env)$/i;
     const TEXT_ATTACHMENT_NAME_RE = /^(dockerfile|makefile|readme|license|procfile|gemfile|rakefile|brewfile|\.env.*)$/i;
@@ -425,6 +429,346 @@ export function getChatScript(brandIconUri: string): string {
       return (toolCalls || []).filter((tc) => getEffectiveToolStatus(tc, pendingApprovalMap) === "pending");
     }
 
+    function truncateText(value, maxLength) {
+      const text = String(value || "").replace(/\s+/g, " ").trim();
+      if (!text) return "";
+      if (text.length <= maxLength) return text;
+      return text.slice(0, Math.max(0, maxLength - 1)).trimEnd() + "…";
+    }
+
+    function summarizeToolContent(content) {
+      const text = String(content || "").trim();
+      const lines = text.split("\\n").map((line) => line.trim()).filter(Boolean);
+      const firstLine = lines[0] || "";
+
+      let summary = "";
+      let detailTitle = "Tool details";
+
+      let match = text.match(/^Web search results for "([^"]+)":/i);
+      if (match) {
+        summary = 'Used web search for "' + match[1] + '"';
+        detailTitle = "Search results";
+      }
+
+      if (!summary) {
+        match = text.match(/^Command failed(?: \(exit \d+\))?:\s*\`([^\`]+)\`/im);
+        if (match) {
+          summary = "Command failed: " + match[1];
+          detailTitle = "Command output";
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^Command:\s*\`([^\`]+)\`/im);
+        if (match) {
+          summary = "Ran command: " + match[1];
+          detailTitle = "Command output";
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^Contents of \`([^\`]+)\`/im);
+        if (match) {
+          summary = "Listed files: " + match[1];
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^Workspace symbols matching "([^"]+)"/im);
+        if (match) {
+          summary = 'Searched workspace symbols: "' + match[1] + '"';
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^No workspace symbols matched "([^"]+)"/im);
+        if (match) {
+          summary = 'No workspace symbols matched "' + match[1] + '"';
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^Opened \`([^\`]+)\`/im);
+        if (match) {
+          summary = "Opened file: " + match[1];
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^Opened definition at \`([^\`]+)\`/im);
+        if (match) {
+          summary = "Opened definition: " + match[1];
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^\[Context pressure detected:(.+)\]$/im);
+        if (match) {
+          summary = truncateText("Context pressure detected:" + match[1], 160);
+          detailTitle = "Recovery details";
+        }
+      }
+
+      if (!summary) {
+        match = text.match(/^\[Error:\s*(.+?)\]$/im);
+        if (match) {
+          summary = truncateText("Error: " + match[1], 160);
+          detailTitle = "Error details";
+        }
+      }
+
+      if (!summary) {
+        if (/^Task list updated:/im.test(text)) {
+          summary = "Updated task list";
+          detailTitle = "Task list";
+        } else if (/^Blocked by /im.test(firstLine)) {
+          summary = truncateText(firstLine, 160);
+          detailTitle = "Blocked action";
+        } else if (/^Error /im.test(firstLine) || /^Error:/im.test(firstLine)) {
+          summary = truncateText(firstLine, 160);
+          detailTitle = "Error details";
+        }
+      }
+
+      if (!summary) {
+        summary = truncateText(firstLine || "Tool finished.", 160);
+      }
+
+      const shouldCollapse = text.length > 220 || lines.length > 4 || detailTitle !== "Tool details";
+      return {
+        summary,
+        detailTitle,
+        details: text,
+        shouldCollapse,
+      };
+    }
+
+    function createCollapsibleToolDetails(summary, detailTitle, details, options) {
+      const shell = document.createElement("div");
+      shell.className = "tool-details-shell";
+
+      const summaryEl = document.createElement("div");
+      summaryEl.className = "tool-details-summary";
+      summaryEl.textContent = summary;
+      shell.appendChild(summaryEl);
+
+      const detailText = String(details || "").trim();
+      const shouldCollapse = !!options?.collapsedByDefault && !!detailText;
+
+      if (!detailText) {
+        return shell;
+      }
+
+      if (!shouldCollapse) {
+        return shell;
+      }
+
+      const detailsWrap = document.createElement("div");
+      detailsWrap.className = "tool-details-content";
+      detailsWrap.innerHTML = renderInlineMarkdown(detailText);
+
+      detailsWrap.style.display = "none";
+
+      const toggle = document.createElement("button");
+      toggle.className = "tool-details-toggle";
+      toggle.type = "button";
+      toggle.textContent = "Show details";
+      toggle.title = detailTitle || "Tool details";
+      toggle.onclick = () => {
+        const expanded = detailsWrap.style.display !== "none";
+        detailsWrap.style.display = expanded ? "none" : "";
+        toggle.textContent = expanded ? "Show details" : "Hide details";
+      };
+      shell.appendChild(toggle);
+
+      shell.appendChild(detailsWrap);
+      return shell;
+    }
+
+    function findToolCallById(payload, toolCallId) {
+      const transcript = Array.isArray(payload?.transcript) ? payload.transcript : [];
+      for (let i = transcript.length - 1; i >= 0; i--) {
+        const toolCalls = Array.isArray(transcript[i].toolCalls) ? transcript[i].toolCalls : [];
+        for (const toolCall of toolCalls) {
+          if (toolCall && toolCall.id === toolCallId) {
+            return toolCall;
+          }
+        }
+      }
+      return null;
+    }
+
+    function describePendingToolCall(toolCall, approval) {
+      if (toolCall) {
+        if (toolCall.type === "web_search") return toolCall.query || "Search the web";
+        if (toolCall.type === "run_command") return toolCall.command || "Run command";
+        if (toolCall.type === "grep") {
+          return toolCall.pattern
+            ? toolCall.pattern + (toolCall.glob ? " (" + toolCall.glob + ")" : "")
+            : "Search code";
+        }
+        if (toolCall.type === "glob") return toolCall.glob || "Find files";
+        if (toolCall.type === "git_commit") return toolCall.commitMessage || "Create commit";
+        if (toolCall.type === "git_status") return "Inspect git status";
+        if (toolCall.type === "git_diff") return "Inspect git diff";
+        if (toolCall.type === "list_tools") return toolCall.query || "List tools";
+        if (toolCall.type === "list_skills") return toolCall.query || "List skills";
+        if (toolCall.type === "run_skill") return toolCall.skillName || "Run skill";
+        if (toolCall.type === "diagnostics") return toolCall.filePath || "Inspect diagnostics";
+        if (toolCall.type === "find_references" || toolCall.type === "go_to_definition" || toolCall.type === "document_symbols" || toolCall.type === "workspace_symbols" || toolCall.type === "hover_symbol" || toolCall.type === "code_actions" || toolCall.type === "apply_code_action" || toolCall.type === "open_file" || toolCall.type === "open_definition") {
+          return toolCall.filePath || "Inspect code";
+        }
+        return toolCall.filePath || approval?.filePath || "Pending action";
+      }
+      return approval?.filePath || "Pending action";
+    }
+
+    function renderApprovalDock(payload) {
+      if (!approvalDock) return;
+
+      const harnessState = getHarnessState(payload);
+      const pendingApprovals = Array.isArray(harnessState.pendingApprovals)
+        ? harnessState.pendingApprovals
+        : [];
+      const pendingDiffSet = getPendingDiffSet(payload);
+
+      approvalDock.innerHTML = "";
+
+      if (!pendingApprovals.length) {
+        approvalDock.style.display = "none";
+        approvalDock.classList.remove("active");
+        return;
+      }
+
+      approvalDock.style.display = "";
+      approvalDock.classList.add("active");
+
+      const shell = document.createElement("div");
+      shell.className = "approval-dock-shell";
+
+      const header = document.createElement("div");
+      header.className = "approval-dock-header";
+
+      const titleWrap = document.createElement("div");
+      titleWrap.className = "approval-dock-title-wrap";
+
+      const label = document.createElement("span");
+      label.className = "approval-dock-label";
+      label.textContent = pendingApprovals.length === 1 ? "Approval Required" : "Approvals Required";
+      titleWrap.appendChild(label);
+
+      const copy = document.createElement("span");
+      copy.className = "approval-dock-copy";
+      copy.textContent =
+        pendingApprovals.length === 1
+          ? "1 action is waiting for confirmation."
+          : pendingApprovals.length + " actions are waiting for confirmation.";
+      titleWrap.appendChild(copy);
+      header.appendChild(titleWrap);
+
+      const badge = document.createElement("span");
+      badge.className = "harness-badge pending";
+      badge.textContent = pendingApprovals.length + " pending";
+      header.appendChild(badge);
+      shell.appendChild(header);
+
+      if (pendingApprovals.length > 1) {
+        const bulkActions = document.createElement("div");
+        bulkActions.className = "approval-dock-actions";
+
+        const approveAll = document.createElement("button");
+        approveAll.className = "tool-btn tool-btn-approve";
+        approveAll.textContent = "Accept All";
+        approveAll.disabled = !!payload.busy;
+        approveAll.onclick = () => vscode.postMessage({ type: "approveAllToolCalls" });
+        bulkActions.appendChild(approveAll);
+
+        const rejectAll = document.createElement("button");
+        rejectAll.className = "tool-btn tool-btn-reject";
+        rejectAll.textContent = "Decline All";
+        rejectAll.disabled = !!payload.busy;
+        rejectAll.onclick = () => vscode.postMessage({ type: "rejectAllToolCalls" });
+        bulkActions.appendChild(rejectAll);
+
+        shell.appendChild(bulkActions);
+      }
+
+      const list = document.createElement("div");
+      list.className = "approval-dock-list";
+
+      for (const approval of pendingApprovals) {
+        const toolCall = findToolCallById(payload, approval.toolCallId);
+        const row = document.createElement("div");
+        row.className = "approval-dock-item";
+
+        const info = document.createElement("div");
+        info.className = "approval-dock-info";
+
+        const top = document.createElement("div");
+        top.className = "approval-dock-top";
+
+        const type = document.createElement("span");
+        type.className = "approval-dock-type";
+        type.textContent = (toolCall?.type || approval.toolType || "tool_call").replace(/_/g, " ");
+        top.appendChild(type);
+
+        if (pendingDiffSet.has(approval.toolCallId)) {
+          const diffBadge = document.createElement("span");
+          diffBadge.className = "approval-dock-note";
+          diffBadge.textContent = "Diff ready";
+          top.appendChild(diffBadge);
+        }
+
+        info.appendChild(top);
+
+        const path = document.createElement("div");
+        path.className = "approval-dock-path";
+        path.textContent = describePendingToolCall(toolCall, approval);
+        info.appendChild(path);
+
+        row.appendChild(info);
+
+        const actions = document.createElement("div");
+        actions.className = "approval-dock-actions";
+
+        if (
+          toolCall &&
+          pendingDiffSet.has(approval.toolCallId) &&
+          (toolCall.type === "edit_file" || toolCall.type === "write_file")
+        ) {
+          const previewBtn = document.createElement("button");
+          previewBtn.className = "tool-btn";
+          previewBtn.textContent = "View Diff";
+          previewBtn.disabled = !!payload.busy;
+          previewBtn.onclick = () =>
+            vscode.postMessage({ type: "openDiff", toolCallId: approval.toolCallId });
+          actions.appendChild(previewBtn);
+        }
+
+        const approveBtn = document.createElement("button");
+        approveBtn.className = "tool-btn tool-btn-approve";
+        approveBtn.textContent = "Accept";
+        approveBtn.disabled = !!payload.busy;
+        approveBtn.onclick = () =>
+          vscode.postMessage({ type: "approveToolCall", toolCallId: approval.toolCallId });
+        actions.appendChild(approveBtn);
+
+        const rejectBtn = document.createElement("button");
+        rejectBtn.className = "tool-btn tool-btn-reject";
+        rejectBtn.textContent = "Decline";
+        rejectBtn.disabled = !!payload.busy;
+        rejectBtn.onclick = () =>
+          vscode.postMessage({ type: "rejectToolCall", toolCallId: approval.toolCallId });
+        actions.appendChild(rejectBtn);
+
+        row.appendChild(actions);
+        list.appendChild(row);
+      }
+
+      shell.appendChild(list);
+      approvalDock.appendChild(shell);
+    }
+
     /** Build a fingerprint string for a transcript entry so we can detect changes. */
     function msgFingerprint(entry, idx, pendingApprovalMap, pendingDiffSet) {
       const tcPart = entry.toolCalls
@@ -455,8 +799,14 @@ export function getChatScript(brandIconUri: string): string {
       const items = payload.transcript || [];
       const pendingApprovalMap = getPendingApprovalMap(payload);
       const pendingDiffSet = getPendingDiffSet(payload);
+      const visibleItems = [];
 
-      if (!items.length && !isStreaming) {
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].role === "system") continue;
+        visibleItems.push({ entry: items[i], idx: i });
+      }
+
+      if (!visibleItems.length && !isStreaming) {
         messagesEl.innerHTML =
           '<div class="empty-state">' +
           '  <img src="${brandIconUri}" alt="" />' +
@@ -474,15 +824,17 @@ export function getChatScript(brandIconUri: string): string {
         return;
       }
 
+      const emptyStateEl = messagesEl.querySelector(":scope > .empty-state");
+      if (emptyStateEl) {
+        emptyStateEl.remove();
+      }
+
       // Build new fingerprints and compare with previous render
       const newFingerprints = [];
-      const visibleItems = [];
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].role === "system") continue;
+      for (const item of visibleItems) {
         newFingerprints.push(
-          msgFingerprint(items[i], i, pendingApprovalMap, pendingDiffSet),
+          msgFingerprint(item.entry, item.idx, pendingApprovalMap, pendingDiffSet),
         );
-        visibleItems.push({ entry: items[i], idx: i });
       }
 
       // Fast path: if nothing changed, skip the entire render
@@ -535,7 +887,7 @@ export function getChatScript(brandIconUri: string): string {
       if (entry.role === "tool") {
         const label = document.createElement("div");
         label.className = "msg-label";
-        label.textContent = "Tool Result";
+        label.textContent = "Tool";
         div.appendChild(label);
       }
 
@@ -544,6 +896,16 @@ export function getChatScript(brandIconUri: string): string {
 
       if (entry.role === "assistant") {
         body.innerHTML = formatThinkBlocks(entry.content);
+      } else if (entry.role === "tool") {
+        const toolSummary = summarizeToolContent(entry.content);
+        body.appendChild(
+          createCollapsibleToolDetails(
+            toolSummary.summary,
+            toolSummary.detailTitle,
+            toolSummary.details,
+            { collapsedByDefault: toolSummary.shouldCollapse },
+          ),
+        );
       } else {
         body.innerHTML = renderInlineMarkdown(entry.content);
       }
@@ -585,105 +947,18 @@ export function getChatScript(brandIconUri: string): string {
         div.classList.add("msg-has-stats");
         const statsEl = document.createElement("div");
         statsEl.className = "msg-stats";
+        const responseModel = stats.responseModel || "";
         const tps = stats.tokPerSec > 0 ? stats.tokPerSec.toFixed(1) + " tok/s" : "";
         const tokens = stats.totalTokens ? "~" + stats.totalTokens + " tokens" : "";
         const elapsed = stats.elapsed > 0 ? stats.elapsed.toFixed(1) + "s" : "";
-        statsEl.textContent = [tps, tokens, elapsed].filter(Boolean).join(" \\u00b7 ");
-        statsEl.title = "Generation speed for this response";
+        statsEl.textContent = [responseModel, tps, tokens, elapsed].filter(Boolean).join(" \\u00b7 ");
+        statsEl.title = responseModel
+          ? "Actual model and generation stats for this response"
+          : "Generation stats for this response";
         div.appendChild(statsEl);
       }
 
       if (entry.toolCalls && entry.toolCalls.length) {
-        const pendingToolCalls = getPendingToolCalls(
-          entry.toolCalls,
-          pendingApprovalMap,
-        );
-        const pendingCount = pendingToolCalls.length;
-        if (pendingCount > 1) {
-          const batchBar = document.createElement("div");
-          batchBar.className = "batch-actions";
-          const previewAll = document.createElement("button");
-          previewAll.className = "tool-btn";
-          previewAll.style.cssText = "border-color:var(--accent);color:var(--accent);";
-          previewAll.textContent = "Preview All Changes";
-          previewAll.onclick = () => {
-            const previewContainer = div.querySelector(".multi-file-preview");
-            if (previewContainer) {
-              previewContainer.remove();
-            } else {
-              const editCalls = pendingToolCalls.filter(
-                (t) =>
-                  pendingDiffSet.has(t.id) &&
-                  (t.type === "edit_file" || t.type === "write_file"),
-              );
-              if (editCalls.length) {
-                const preview = document.createElement("div");
-                preview.className = "multi-file-preview";
-                const header = document.createElement("div");
-                header.className = "multi-file-header";
-                header.textContent = editCalls.length + " file" + (editCalls.length > 1 ? "s" : "") + " will be changed:";
-                preview.appendChild(header);
-                for (const tc of editCalls) {
-                  const fileBlock = document.createElement("div");
-                  fileBlock.className = "multi-file-block";
-                  const fileHeader = document.createElement("div");
-                  fileHeader.className = "multi-file-file-header";
-                  fileHeader.textContent = (tc.type === "write_file" ? "[new] " : "") + (tc.filePath || "");
-                  fileBlock.appendChild(fileHeader);
-                  if (tc.type === "edit_file" && tc.search) {
-                    const searchLines = tc.search.split("\\n");
-                    for (const line of searchLines) {
-                      const lineEl = document.createElement("div");
-                      lineEl.className = "diff-line-removed";
-                      lineEl.textContent = "- " + line;
-                      fileBlock.appendChild(lineEl);
-                    }
-                    if (tc.replace !== undefined) {
-                      const replaceLines = (tc.replace || "").split("\\n");
-                      for (const line of replaceLines) {
-                        const lineEl = document.createElement("div");
-                        lineEl.className = "diff-line-added";
-                        lineEl.textContent = "+ " + line;
-                        fileBlock.appendChild(lineEl);
-                      }
-                    }
-                  } else if (tc.type === "write_file" && tc.content) {
-                    const contentLines = tc.content.split("\\n");
-                    const maxLines = 20;
-                    const showLines = contentLines.slice(0, maxLines);
-                    for (const line of showLines) {
-                      const lineEl = document.createElement("div");
-                      lineEl.className = "diff-line-added";
-                      lineEl.textContent = "+ " + line;
-                      fileBlock.appendChild(lineEl);
-                    }
-                    if (contentLines.length > maxLines) {
-                      const moreEl = document.createElement("div");
-                      moreEl.className = "diff-line-added";
-                      moreEl.style.opacity = "0.6";
-                      moreEl.textContent = "  ... +" + (contentLines.length - maxLines) + " more lines";
-                      fileBlock.appendChild(moreEl);
-                    }
-                  }
-                  preview.appendChild(fileBlock);
-                }
-                div.insertBefore(preview, batchBar.nextSibling);
-              }
-            }
-          };
-          batchBar.appendChild(previewAll);
-          const acceptAll = document.createElement("button");
-          acceptAll.className = "tool-btn tool-btn-approve";
-          acceptAll.textContent = "Accept All (" + pendingCount + ")";
-          acceptAll.onclick = () => vscode.postMessage({ type: "approveAllToolCalls" });
-          batchBar.appendChild(acceptAll);
-          const rejectAll = document.createElement("button");
-          rejectAll.className = "tool-btn tool-btn-reject";
-          rejectAll.textContent = "Reject All";
-          rejectAll.onclick = () => vscode.postMessage({ type: "rejectAllToolCalls" });
-          batchBar.appendChild(rejectAll);
-          div.appendChild(batchBar);
-        }
         for (const tc of entry.toolCalls) {
           div.appendChild(renderToolCall(tc, pendingApprovalMap, pendingDiffSet));
         }
@@ -719,38 +994,10 @@ export function getChatScript(brandIconUri: string): string {
       pathEl.textContent = pathText;
       header.appendChild(pathEl);
 
-      if (effectiveStatus === "pending") {
-        const actions = document.createElement("div");
-        actions.className = "tool-call-actions";
-
-        if (pendingDiffSet.has(tc.id) && tc.type === "edit_file") {
-          const diffBtn = document.createElement("button");
-          diffBtn.className = "tool-btn";
-          diffBtn.style.cssText = "border-color:var(--accent);color:var(--accent);";
-          diffBtn.textContent = "View Diff";
-          diffBtn.onclick = () => vscode.postMessage({ type: "openDiff", toolCallId: tc.id });
-          actions.appendChild(diffBtn);
-        }
-
-        const approveBtn = document.createElement("button");
-        approveBtn.className = "tool-btn tool-btn-approve";
-        approveBtn.textContent = "Accept";
-        approveBtn.onclick = () => vscode.postMessage({ type: "approveToolCall", toolCallId: tc.id });
-        actions.appendChild(approveBtn);
-
-        const rejectBtn = document.createElement("button");
-        rejectBtn.className = "tool-btn tool-btn-reject";
-        rejectBtn.textContent = "Reject";
-        rejectBtn.onclick = () => vscode.postMessage({ type: "rejectToolCall", toolCallId: tc.id });
-        actions.appendChild(rejectBtn);
-
-        header.appendChild(actions);
-      } else {
-        const badge = document.createElement("span");
-        badge.className = "tool-status " + effectiveStatus;
-        badge.textContent = effectiveStatus;
-        header.appendChild(badge);
-      }
+      const badge = document.createElement("span");
+      badge.className = "tool-status " + effectiveStatus;
+      badge.textContent = effectiveStatus === "pending" ? "awaiting approval" : effectiveStatus;
+      header.appendChild(badge);
 
       card.appendChild(header);
 
@@ -783,22 +1030,13 @@ export function getChatScript(brandIconUri: string): string {
       if (tc.result) {
         const resultEl = document.createElement("div");
         resultEl.className = "tool-call-result";
-        if (tc.result.length > 500) {
-          resultEl.textContent = tc.result.slice(0, 500) + "...";
-          const expandBtn = document.createElement("button");
-          expandBtn.className = "tool-result-expand";
-          expandBtn.textContent = "Show more";
-          let expanded = false;
-          expandBtn.onclick = () => {
-            expanded = !expanded;
-            resultEl.textContent = expanded ? tc.result : tc.result.slice(0, 500) + "...";
-            expandBtn.textContent = expanded ? "Show less" : "Show more";
-            resultEl.appendChild(expandBtn);
-          };
-          resultEl.appendChild(expandBtn);
-        } else {
-          resultEl.textContent = tc.result;
-        }
+        const toolSummary = summarizeToolContent(tc.result);
+        const summaryText = toolSummary.summary || "Tool finished.";
+        resultEl.textContent =
+          summaryText +
+          (toolSummary.details && toolSummary.shouldCollapse
+            ? " Details below."
+            : "");
         card.appendChild(resultEl);
       }
 
@@ -812,9 +1050,6 @@ export function getChatScript(brandIconUri: string): string {
       const pendingApprovals = Array.isArray(harnessState.pendingApprovals)
         ? harnessState.pendingApprovals
         : [];
-      const pendingDiffCount = Array.isArray(harnessState.pendingDiffs)
-        ? harnessState.pendingDiffs.length
-        : 0;
       const todoItems = Array.isArray(harnessState.todoItems)
         ? harnessState.todoItems
         : [];
@@ -838,7 +1073,6 @@ export function getChatScript(brandIconUri: string): string {
       if (
         runtimeHealth.level === "ok" &&
         !todoItems.length &&
-        !pendingApprovals.length &&
         !backgroundTasks.length
       ) {
         harnessPane.style.display = "none";
@@ -1001,65 +1235,6 @@ export function getChatScript(brandIconUri: string): string {
         }
 
         card.appendChild(list);
-        harnessPane.appendChild(card);
-      }
-
-      if (pendingApprovals.length) {
-        const card = document.createElement("div");
-        card.className = "harness-card";
-
-        const header = document.createElement("div");
-        header.className = "harness-card-header";
-
-        const title = document.createElement("div");
-        title.className = "harness-card-title";
-
-        const label = document.createElement("span");
-        label.className = "harness-card-label";
-        label.textContent = "Approvals";
-        title.appendChild(label);
-
-        const copy = document.createElement("span");
-        copy.className = "harness-card-copy";
-        copy.textContent =
-          pendingApprovals.length === 1
-            ? "1 tool action is waiting for approval."
-            : pendingApprovals.length + " tool actions are waiting for approval.";
-        title.appendChild(copy);
-        header.appendChild(title);
-
-        const badge = document.createElement("span");
-        badge.className = "harness-badge pending";
-        badge.textContent = pendingApprovals.length + " pending";
-        header.appendChild(badge);
-        card.appendChild(header);
-
-        const meta = document.createElement("div");
-        meta.className = "harness-card-meta";
-        meta.textContent = pendingDiffCount
-          ? pendingDiffCount + " diff preview" + (pendingDiffCount === 1 ? "" : "s") + " ready in the chat cards below."
-          : "Review the tool cards in chat to approve or reject changes.";
-        card.appendChild(meta);
-
-        if (pendingApprovals.length > 1) {
-          const actions = document.createElement("div");
-          actions.className = "harness-card-actions";
-
-          const approveAll = document.createElement("button");
-          approveAll.className = "tool-btn tool-btn-approve";
-          approveAll.textContent = "Approve All";
-          approveAll.onclick = () => vscode.postMessage({ type: "approveAllToolCalls" });
-          actions.appendChild(approveAll);
-
-          const rejectAll = document.createElement("button");
-          rejectAll.className = "tool-btn tool-btn-reject";
-          rejectAll.textContent = "Reject All";
-          rejectAll.onclick = () => vscode.postMessage({ type: "rejectAllToolCalls" });
-          actions.appendChild(rejectAll);
-
-          card.appendChild(actions);
-        }
-
         harnessPane.appendChild(card);
       }
 
@@ -1299,6 +1474,7 @@ export function getChatScript(brandIconUri: string): string {
     function startStreaming() {
       isStreaming = true;
       streamingText = "";
+      streamingToolMode = false;
       streamStartTime = Date.now();
       streamChunkCount = 0;
 
@@ -1321,6 +1497,12 @@ export function getChatScript(brandIconUri: string): string {
       streamingText += text;
       streamChunkCount++;
       if (streamingEl) {
+        if (streamingToolMode) {
+          streamingEl.innerHTML =
+            '<div class="stream-status">Calling tools...</div><span class="streaming-cursor"></span>';
+          scrollToBottom();
+          return;
+        }
         const trimmed = streamingText.trim();
         let statusLabel = "";
         const fallbackLabel = trimmed
@@ -1374,17 +1556,21 @@ export function getChatScript(brandIconUri: string): string {
       }
       streamingEl = null;
       streamingText = "";
+      streamingToolMode = false;
     }
 
     /* ── Session menu ── */
     function getActiveSession() {
-      if (!state?.sessions?.length) return null;
-      return state.sessions.find(s => s.id === state.activeSessionId) || null;
+      if (!state?.activeSessionId) return null;
+      return {
+        id: state.activeSessionId,
+        title: state.activeSessionTitle || "PocketAI Code",
+      };
     }
 
     function syncSessionTitle() {
       const activeSession = getActiveSession();
-      const title = activeSession ? activeSession.title : "Chat";
+      const title = activeSession ? activeSession.title : "PocketAI Code";
       sessionLabel.textContent = title;
       if (!isEditingSessionTitle || editingSessionId !== activeSession?.id) {
         sessionTitleInput.value = title;
@@ -1408,9 +1594,11 @@ export function getChatScript(brandIconUri: string): string {
 
       const activeSession = getActiveSession();
       const previousTitle =
-        (state?.sessions || []).find(s => s.id === editingSessionId)?.title ||
+        (editingSessionId && editingSessionId === state?.activeSessionId
+          ? state?.activeSessionTitle
+          : (state?.sessions || []).find(s => s.id === editingSessionId)?.title) ||
         sessionLabel.textContent ||
-        "Chat";
+        "PocketAI Code";
       const nextTitle = sessionTitleInput.value.trim().replace(/\\s+/g, " ");
       const targetSessionId = editingSessionId;
 
@@ -1429,15 +1617,17 @@ export function getChatScript(brandIconUri: string): string {
       vscode.postMessage({ type: "renameSession", sessionId: targetSessionId, title: nextTitle });
     }
 
-    function renderSessions(payload) {
+    function renderSessionItems(sessions, activeSessionId) {
       sessionList.innerHTML = "";
-      const active = payload.activeSessionId;
-      syncSessionTitle();
-
-      for (const s of payload.sessions || []) {
+      for (const s of sessions || []) {
         const item = document.createElement("div");
-        item.className = "session-menu-item" + (s.id === active ? " active" : "");
+        const isPendingDelete = pendingDeleteSessionId === s.id;
+        item.className =
+          "session-menu-item" +
+          (s.id === activeSessionId ? " active" : "") +
+          (isPendingDelete ? " delete-confirming" : "");
         item.onclick = () => {
+          pendingDeleteSessionId = "";
           vscode.postMessage({ type: "switchSession", sessionId: s.id });
           sessionMenu.classList.remove("open");
           sessionSearchWrap.style.display = "none";
@@ -1450,11 +1640,20 @@ export function getChatScript(brandIconUri: string): string {
         item.appendChild(titleEl);
 
         const delBtn = document.createElement("button");
-        delBtn.className = "delete-btn";
-        delBtn.textContent = "\\u00d7";
+        delBtn.className = "delete-btn" + (isPendingDelete ? " confirm" : "");
+        delBtn.textContent = isPendingDelete ? "Confirm" : "\\u00d7";
+        delBtn.title = isPendingDelete
+          ? "Are you sure you want to delete this chat?"
+          : "Delete chat";
         delBtn.onclick = (e) => {
           e.stopPropagation();
-          vscode.postMessage({ type: "deleteSession", sessionId: s.id });
+          if (pendingDeleteSessionId === s.id) {
+            pendingDeleteSessionId = "";
+            vscode.postMessage({ type: "deleteSession", sessionId: s.id });
+            return;
+          }
+          pendingDeleteSessionId = s.id;
+          renderSessionItems(visibleSessions, activeSessionId);
         };
         item.appendChild(delBtn);
 
@@ -1462,11 +1661,18 @@ export function getChatScript(brandIconUri: string): string {
       }
     }
 
+    function renderSessions(payload) {
+      visibleSessions = payload.sessions || [];
+      syncSessionTitle();
+      renderSessionItems(visibleSessions, payload.activeSessionId);
+    }
+
     /* ── State handler ── */
     let lastRenderedSessionId = "";
 
     function handleState(payload) {
       state = payload;
+      pendingDeleteSessionId = "";
 
       // Reset message cache when switching sessions so we do a full re-render
       if (payload.activeSessionId && payload.activeSessionId !== lastRenderedSessionId) {
@@ -1493,10 +1699,11 @@ export function getChatScript(brandIconUri: string): string {
       isStreaming = false;
       streamingEl = null;
       streamingText = "";
+      streamingToolMode = false;
 
-      const currentMode = payload.mode || "ask";
+      const currentMode = payload.mode || "auto";
       if (modeTriggerLabel) {
-        modeTriggerLabel.textContent = MODE_LABELS[currentMode] || "Ask";
+        modeTriggerLabel.textContent = MODE_LABELS[currentMode] || "Auto";
       }
       if (modeMenu) {
         modeMenu.querySelectorAll("[data-mode]").forEach((btn) => {
@@ -1573,6 +1780,7 @@ export function getChatScript(brandIconUri: string): string {
 
       renderMessages(payload);
       renderHarnessPane(payload);
+      renderApprovalDock(payload);
       renderSessions(payload);
       renderResourceWarnings(payload);
     }
@@ -1770,6 +1978,14 @@ export function getChatScript(brandIconUri: string): string {
           case "streamChunk":
             appendStreamChunk(msg.text);
             break;
+          case "streamToolCallDetected":
+            streamingToolMode = true;
+            streamingText = "";
+            if (streamingEl) {
+              streamingEl.innerHTML =
+                '<div class="stream-status">Calling tools...</div><span class="streaming-cursor"></span>';
+            }
+            break;
           case "streamEnd": {
             const elapsedMs = streamStartTime ? Date.now() - streamStartTime : 0;
             const elapsedSec = elapsedMs / 1000;
@@ -1780,6 +1996,7 @@ export function getChatScript(brandIconUri: string): string {
 
             if (state && state.transcript) {
               messageStats.set("__pending__", {
+                responseModel: msg.responseModel || "",
                 tokPerSec: tokPerSec,
                 totalTokens: completionTokens,
                 elapsed: elapsedSec
@@ -2209,6 +2426,10 @@ export function getChatScript(brandIconUri: string): string {
       sessionMenu.classList.toggle("open");
       const isOpen = sessionMenu.classList.contains("open");
       sessionSearchWrap.style.display = isOpen ? "block" : "none";
+      if (!isOpen) {
+        pendingDeleteSessionId = "";
+        renderSessionItems(visibleSessions, state ? state.activeSessionId : "");
+      }
       if (isOpen) sessionSearch.focus();
     });
 
@@ -2231,6 +2452,7 @@ export function getChatScript(brandIconUri: string): string {
     });
 
     newSessionBtn.addEventListener("click", () => {
+      pendingDeleteSessionId = "";
       vscode.postMessage({ type: "newSession" });
       sessionMenu.classList.remove("open");
       sessionSearchWrap.style.display = "none";
@@ -2238,8 +2460,10 @@ export function getChatScript(brandIconUri: string): string {
 
     document.addEventListener("click", (e) => {
       if (!sessionMenu.contains(e.target) && !sessionTrigger.contains(e.target)) {
+        pendingDeleteSessionId = "";
         sessionMenu.classList.remove("open");
         sessionSearchWrap.style.display = "none";
+        renderSessionItems(visibleSessions, state ? state.activeSessionId : "");
       }
       if (modeMenuWrap && !modeMenuWrap.contains(e.target)) {
         closeModeMenu();
@@ -2276,32 +2500,13 @@ export function getChatScript(brandIconUri: string): string {
     });
 
     sessionSearch.addEventListener("input", () => {
+      pendingDeleteSessionId = "";
       vscode.postMessage({ type: "searchSessions", query: sessionSearch.value });
     });
 
     function renderFilteredSessions(sessions) {
-      sessionList.innerHTML = "";
-      const active = state ? state.activeSessionId : "";
-      for (const s of sessions) {
-        const item = document.createElement("div");
-        item.className = "session-menu-item" + (s.id === active ? " active" : "");
-        item.onclick = () => {
-          vscode.postMessage({ type: "switchSession", sessionId: s.id });
-          sessionMenu.classList.remove("open");
-          sessionSearchWrap.style.display = "none";
-          sessionSearch.value = "";
-        };
-        const titleEl = document.createElement("span");
-        titleEl.className = "title";
-        titleEl.textContent = s.title;
-        item.appendChild(titleEl);
-        const delBtn = document.createElement("button");
-        delBtn.className = "delete-btn";
-        delBtn.textContent = "\\u00d7";
-        delBtn.onclick = (e) => { e.stopPropagation(); vscode.postMessage({ type: "deleteSession", sessionId: s.id }); };
-        item.appendChild(delBtn);
-        sessionList.appendChild(item);
-      }
+      visibleSessions = sessions || [];
+      renderSessionItems(visibleSessions, state ? state.activeSessionId : "");
     }
 
     /* ── @-mention system ── */

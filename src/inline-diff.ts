@@ -4,7 +4,7 @@ import type { ToolCall } from "./types";
 
 /**
  * Manages inline diff decorations and CodeLens for pending edit_file tool calls.
- * Shows accept/reject lenses directly in the editor, similar to Claude Code.
+ * Shows accept/reject lenses directly in the editor for pending changes.
  */
 export class InlineDiffManager {
   private pendingDiffs = new Map<

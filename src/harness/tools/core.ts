@@ -441,7 +441,9 @@ export async function executeRunCommandTool(
     if (useTerminal) {
       try {
         const { output: terminalOutput, exitCode } =
-          await deps.terminalMgr!.executeCommand(cmd, rootPath);
+          await deps.terminalMgr!.executeCommand(cmd, rootPath, timeoutMs, {
+            reveal: false,
+          });
         const output =
           terminalOutput.length > 10000
             ? `${terminalOutput.slice(0, 10000)}\n... [truncated]`
@@ -451,7 +453,9 @@ export async function executeRunCommandTool(
         }
         return `Command: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
       } catch (error) {
-        return `Command failed: \`${cmd}\`\n\`\`\`\n${(error as Error).message}\n\`\`\``;
+        deps.outputChannel.appendLine(
+          `⚠ Terminal execution unavailable, falling back to captured process for: ${cmd}`,
+        );
       }
     }
 
