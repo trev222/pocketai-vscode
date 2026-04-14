@@ -17,6 +17,7 @@ import {
 } from "./constants";
 import { generateToolCallId } from "./helpers";
 import type { OpenAITool } from "./tool-definitions";
+import { toOpenCodeGoRequestModel } from "./opencode-go";
 
 /**
  * Wrapper around fetch that produces actionable error messages for network failures.
@@ -54,6 +55,12 @@ async function fetchWithContext(
 export type StreamResult = {
   text: string;
   toolCalls: ToolCall[];
+};
+
+type StreamingToolHint = {
+  toolName: string;
+  toolTarget: string;
+  detail: string;
 };
 
 export interface StreamingDeps {
@@ -128,7 +135,7 @@ function buildCompletionRequestBody(
     : "";
 
   return {
-    model: session.selectedModel,
+    model: toOpenCodeGoRequestModel(session.selectedModel, deps.baseUrl),
     messages,
     temperature: 0.45,
     top_p: 0.9,
@@ -251,7 +258,7 @@ export async function streamResponse(
     deps.config.get<number>("maxContinuations") ?? DEFAULT_AUTO_CONTINUE_LIMIT;
 
   for (let attempt = 0; attempt <= autoContinueLimit; attempt++) {
-    deps.broadcastToWebviews({ type: "streamStart" });
+    deps.broadcastToWebviews({ type: "streamStart", label: "Thinking..." });
 
     const response = await fetchWithContext(`${deps.baseUrl}/v1/chat/completions`, {
       method: "POST",
@@ -411,7 +418,7 @@ export async function streamResponseWithTools(
   deps: StreamingDeps,
   tools?: OpenAITool[],
 ): Promise<StreamResult> {
-  deps.broadcastToWebviews({ type: "streamStart" });
+  deps.broadcastToWebviews({ type: "streamStart", label: "Thinking..." });
 
   const structuredTools = session.mode === "plan" ? undefined : tools;
 
@@ -501,7 +508,6 @@ export async function streamResponseWithTools(
             if (delta?.tool_calls) {
               if (!announcedStructuredToolMode) {
                 announcedStructuredToolMode = true;
-                deps.broadcastToWebviews({ type: "streamToolCallDetected" });
               }
               for (const tc of delta.tool_calls as RawToolCallDelta[]) {
                 const idx = tc.index;
@@ -518,6 +524,13 @@ export async function streamResponseWithTools(
                 if (tc.function?.arguments) {
                   accum.arguments += tc.function.arguments;
                 }
+                const toolHint = buildStreamingToolHint(accum.name, accum.arguments);
+                deps.broadcastToWebviews({
+                  type: "streamToolCallDetected",
+                  toolName: toolHint.toolName || accum.name || "",
+                  toolTarget: toolHint.toolTarget,
+                  detail: toolHint.detail,
+                });
               }
             }
           } catch {}
@@ -583,7 +596,7 @@ export async function streamResponseWithTools(
         },
       ];
 
-      deps.broadcastToWebviews({ type: "streamStart" });
+      deps.broadcastToWebviews({ type: "streamStart", label: "Continuing..." });
       // Use text-only streaming for continuation — avoids recursive auto-continue
       // and token double-counting. If the model needs tools, the tool loop will
       // handle it on the next turn.
@@ -776,6 +789,128 @@ function createToolCallFromFunction(
   }
 
   return tc;
+}
+
+function buildStreamingToolHint(
+  name: string,
+  rawArgs: string,
+): StreamingToolHint {
+  const repairedArgs = tryRepairJson(rawArgs) ?? {};
+  const toolCall = createToolCallFromFunction(name, "", repairedArgs);
+  const compactPath = (value: string) => {
+    const normalized = String(value || "").replace(/\\/g, "/").trim();
+    if (!normalized) return "";
+    const parts = normalized.split("/").filter(Boolean);
+    return parts[parts.length - 1] || normalized;
+  };
+
+  switch (toolCall.type) {
+    case "read_file":
+      return {
+        toolName: "read_file",
+        toolTarget: compactPath(toolCall.filePath),
+        detail: toolCall.filePath || "",
+      };
+    case "edit_file":
+    case "write_file":
+      return {
+        toolName: toolCall.type,
+        toolTarget: compactPath(toolCall.filePath),
+        detail: toolCall.filePath || "",
+      };
+    case "run_command":
+      return {
+        toolName: "run_command",
+        toolTarget: toolCall.command || "",
+        detail: toolCall.description || "",
+      };
+    case "web_search":
+      return {
+        toolName: "web_search",
+        toolTarget: toolCall.query || "",
+        detail: "",
+      };
+    case "web_fetch":
+      return {
+        toolName: "web_fetch",
+        toolTarget: toolCall.url || "",
+        detail: "",
+      };
+    case "grep":
+      return {
+        toolName: "grep",
+        toolTarget: toolCall.pattern || "",
+        detail: toolCall.glob || toolCall.filePath || "",
+      };
+    case "glob":
+      return {
+        toolName: "glob",
+        toolTarget: toolCall.glob || "",
+        detail: toolCall.globPath || "",
+      };
+    case "open_file":
+    case "open_definition":
+    case "go_to_definition":
+    case "find_references":
+    case "document_symbols":
+    case "diagnostics":
+      return {
+        toolName: toolCall.type,
+        toolTarget: compactPath(toolCall.filePath),
+        detail: toolCall.filePath || "",
+      };
+    case "workspace_symbols":
+    case "hover_symbol":
+    case "code_actions":
+    case "apply_code_action":
+      return {
+        toolName: toolCall.type,
+        toolTarget:
+          toolCall.query ||
+          toolCall.actionTitle ||
+          compactPath(toolCall.filePath),
+        detail: toolCall.filePath || "",
+      };
+    case "git_commit":
+      return {
+        toolName: "git_commit",
+        toolTarget: toolCall.commitMessage || "",
+        detail: "",
+      };
+    case "list_tools":
+    case "list_skills":
+      return {
+        toolName: toolCall.type,
+        toolTarget: "",
+        detail: "",
+      };
+    case "run_skill":
+      return {
+        toolName: "run_skill",
+        toolTarget: toolCall.skillName || "",
+        detail: "",
+      };
+    case "todo_write":
+      return {
+        toolName: "todo_write",
+        toolTarget: `${toolCall.todos?.length || 0} tasks`,
+        detail: "",
+      };
+    case "memory_read":
+    case "memory_write":
+    case "memory_delete":
+      return {
+        toolName: toolCall.type,
+        toolTarget: toolCall.memoryName || toolCall.memoryType || "",
+        detail: "",
+      };
+    default:
+      return {
+        toolName: name || "tool",
+        toolTarget: "",
+        detail: "",
+      };
+  }
 }
 
 /**

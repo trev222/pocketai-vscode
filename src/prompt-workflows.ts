@@ -3,6 +3,7 @@ import type {
   FileAttachment,
   ImageAttachment,
 } from "./types";
+import type { EndpointProviderKind } from "./provider-capabilities";
 import { resolveAutoSessionTitle } from "./session-workflows";
 import {
   activateSessionSkill,
@@ -116,8 +117,57 @@ export type PromptPreparationResult =
 const LOCAL_CLOCK_VERIFICATION_COMMAND =
   "date '+%Y-%m-%d %H:%M:%S %Z (%A)'";
 
+function buildBridgeToolDisciplinePrompt(
+  prompt: string,
+  providerKind?: EndpointProviderKind,
+): string | undefined {
+  if (providerKind !== "codex-bridge" && providerKind !== "claude-bridge") {
+    return undefined;
+  }
+
+  const trimmed = prompt.trim();
+  if (!trimmed) return undefined;
+
+  const normalized = trimmed
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const hasUrl = /https?:\/\/\S+/i.test(trimmed);
+  const mentionsRepoScope =
+    /\b(repo|repository|workspace|folder|codebase|project|file|files|source|code)\b/i.test(trimmed);
+  const asksToInspect =
+    /\b(where|find|look|search|inspect|read|open|trace|show|check|scan|review|tell me where)\b/i.test(trimmed);
+  const asksAboutCurrentFact =
+    /\b(weather|forecast|temperature|time|date|day|latest|news|current|currently|right now|today)\b/i.test(trimmed);
+  const asksAboutDocsOrPage =
+    /\b(doc|docs|documentation|page|website|site|github)\b/i.test(trimmed);
+
+  const shouldForceVerification =
+    (mentionsRepoScope && asksToInspect) ||
+    (hasUrl && (asksToInspect || asksAboutDocsOrPage)) ||
+    asksAboutCurrentFact;
+
+  if (!shouldForceVerification) {
+    return undefined;
+  }
+
+  const instructions = [
+    "[Bridge Tool Discipline]",
+    "This request is running through a text-first bridge where PocketAI tools are the executable tool system.",
+    "For this request, do not answer from memory or training alone.",
+    "Before giving a substantive answer, you MUST emit an appropriate PocketAI tool call and wait for the tool result.",
+    "If the user references a repo, workspace, folder, or file, prefer PocketAI repo/file tools such as @read_file, @grep, @glob, @list_files, @open_file, @go_to_definition, @find_references, @document_symbols, @diagnostics, or git tools when relevant.",
+    "If the user references a specific URL or web page, prefer @web_fetch. If they need broader online lookup, prefer @web_search.",
+    "Do not cite file paths, URLs, source locations, or current facts unless they came from a PocketAI tool result in this turn or earlier transcript results.",
+  ];
+
+  return instructions.join("\n");
+}
+
 export function buildTransientSystemPromptForPrompt(
   prompt: string,
+  providerKind?: EndpointProviderKind,
 ): string | undefined {
   const trimmed = prompt.trim();
   if (!trimmed) return undefined;
@@ -137,17 +187,28 @@ export function buildTransientSystemPromptForPrompt(
     /^(?:tell me|can you tell me|could you tell me)\s+(?:today'?s\s+)?date$/,
   ].some((matcher) => matcher.test(normalized));
 
-  if (!shouldVerifyLocally) {
-    return undefined;
+  const instructions: string[] = [];
+  const bridgeToolPrompt = buildBridgeToolDisciplinePrompt(
+    trimmed,
+    providerKind,
+  );
+  if (bridgeToolPrompt) {
+    instructions.push(bridgeToolPrompt);
   }
 
-  return [
-    "[Verified Local Clock Request]",
-    "The user is asking for the current local system time, date, or day.",
-    "Before answering, you MUST verify it with a command and use that command output as the source of truth.",
-    `First emit exactly this tool call and wait for the result: @run_command: ${LOCAL_CLOCK_VERIFICATION_COMMAND}`,
-    "After the tool returns, answer the user's original request directly and concisely using the verified local result.",
-  ].join("\n");
+  if (shouldVerifyLocally) {
+    instructions.push(
+      [
+        "[Verified Local Clock Request]",
+        "The user is asking for the current local system time, date, or day.",
+        "Before answering, you MUST verify it with a command and use that command output as the source of truth.",
+        `First emit exactly this tool call and wait for the result: @run_command: ${LOCAL_CLOCK_VERIFICATION_COMMAND}`,
+        "After the tool returns, answer the user's original request directly and concisely using the verified local result.",
+      ].join("\n"),
+    );
+  }
+
+  return instructions.length ? instructions.join("\n\n") : undefined;
 }
 
 export function preparePromptForSend(options: {
@@ -156,9 +217,13 @@ export function preparePromptForSend(options: {
   availableSkills: HarnessSkillDescriptor[];
   preferredModel: string;
   fallbackTitleNumber: number;
+  providerKind?: EndpointProviderKind;
 }): PromptPreparationResult {
   let trimmed = options.prompt.trim();
-  const transientSystemPrompt = buildTransientSystemPromptForPrompt(trimmed);
+  const transientSystemPrompt = buildTransientSystemPromptForPrompt(
+    trimmed,
+    options.providerKind,
+  );
 
   if (trimmed.startsWith("/")) {
     const parts = trimmed.split(/\s+/);

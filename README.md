@@ -58,6 +58,36 @@ Notes:
 - PocketAI may still send `temperature`, `top_p`, and `max_tokens`, but Codex app-server does not expose Chat Completions-style tuning controls, so those values are not forwarded 1:1.
 - If you want Codex to use a different workspace root, you can still launch the bridge manually with `CODEX_BRIDGE_CWD=/path/to/project npm run codex-bridge`.
 
+## Using Claude CLI
+
+PocketAI also includes a built-in **Connect to Claude** section in the settings sidebar.
+
+1. Open the PocketAI sidebar
+2. In the settings view, click **Connect to Claude**
+3. If you are not signed in yet, PocketAI opens a VS Code terminal and runs `claude auth login` for you
+4. When sign-in completes, PocketAI refreshes the Claude endpoint automatically
+
+What this setup does for you:
+
+- Adds a `Claude Bridge` endpoint at `http://127.0.0.1:39460`
+- Starts the local compatibility bridge automatically
+- Switches PocketAI to that endpoint for chat
+- Keeps PocketAI in charge of tool calling while Claude provides the assistant responses
+
+Manual fallback:
+
+```bash
+claude auth login
+npm run claude-bridge
+```
+
+Notes:
+
+- `apiKey` is ignored by the bridge. Authentication comes from your local `claude auth login` session.
+- The first bridge version is intentionally text-first. PocketAI tools stay in charge, so Claude-backed sessions work best for chat, planning, debugging, and code explanation.
+- The bridge runs Claude in print mode with Claude-native tools disabled and slash commands turned off, so the experience stays consistent with PocketAI's own harness.
+- If you want Claude to use a different workspace root, you can still launch the bridge manually with `CLAUDE_BRIDGE_CWD=/path/to/project npm run claude-bridge`.
+
 ## Features
 
 ### Agentic Tool Loop

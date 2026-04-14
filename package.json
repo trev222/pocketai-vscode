@@ -253,6 +253,7 @@
     }
   },
   "scripts": {
+    "claude-bridge": "node ./scripts/claude-openai-bridge.mjs",
     "codex-bridge": "node ./scripts/codex-openai-bridge.mjs",
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --project tsconfig.json --noEmit",

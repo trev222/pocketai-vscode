@@ -204,6 +204,7 @@ export function getSettingsHtml(): string {
   .endpoint-header-left { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
   .endpoint-name { font-weight: 600; font-size: 13px; }
   .endpoint-url { font-size: 11px; color: var(--fg-muted); word-break: break-all; }
+  .endpoint-body .endpoint-url { margin-bottom: 8px; }
   .endpoint-header-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: 8px; }
   .endpoint-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   .endpoint-status-dot.green { background: #4ec9b0; }
@@ -299,7 +300,8 @@ export function getSettingsHtml(): string {
     margin-top: 8px;
   }
   .add-form.hidden { display: none; }
-  .add-form input {
+  .add-form input,
+  .add-form select {
     width: 100%;
     padding: 6px 8px;
     margin-bottom: 6px;
@@ -310,7 +312,9 @@ export function getSettingsHtml(): string {
     font-size: 12px;
     font-family: inherit;
   }
-  .add-form input:focus { outline: none; border-color: var(--accent); }
+  .add-form input:focus,
+  .add-form select:focus { outline: none; border-color: var(--accent); }
+  .form-row.hidden { display: none; }
   .add-form-actions { display: flex; justify-content: space-between; gap: 6px; }
   .add-form-actions button {
     padding: 6px 12px;
@@ -380,9 +384,9 @@ export function getSettingsHtml(): string {
 
   <h3>Codex</h3>
   <div class="codex-card collapsed" id="codexCard">
-    <div class="codex-header">
+    <div class="codex-header" id="codexHeader">
       <div>
-        <div class="codex-title">Connect to Codex</div>
+        <div class="codex-title">Connect to Codex CLI</div>
         <div class="codex-subtitle">Use your Codex CLI account right from PocketAI. We'll add the endpoint, start the bridge, and switch to it for you.</div>
       </div>
       <div class="codex-header-right">
@@ -403,11 +407,41 @@ export function getSettingsHtml(): string {
         <div class="codex-meta-row"><span>Endpoint</span><strong id="codexEndpointStatus">Not added yet</strong></div>
       </div>
       <div class="codex-actions">
-        <button class="codex-primary-btn" id="connectCodexBtn">Connect to Codex</button>
+        <button class="codex-primary-btn" id="connectCodexBtn">Connect to Codex CLI</button>
         <button class="codex-secondary-btn" id="signInCodexBtn">Sign In</button>
         <button class="codex-secondary-btn" id="refreshCodexBtn">Refresh</button>
       </div>
       <p class="hint">This keeps Codex chat-first inside PocketAI for now. Other endpoints can continue using their existing tool-call flow.</p>
+    </div>
+  </div>
+
+  <h3>Claude</h3>
+  <div class="codex-card collapsed" id="claudeCard">
+    <div class="codex-header" id="claudeHeader">
+      <div>
+        <div class="codex-title">Connect to Claude CLI</div>
+        <div class="codex-subtitle">Use your Claude Code CLI account right from PocketAI. We'll add the endpoint, start the bridge, and switch to it for you.</div>
+      </div>
+      <div class="codex-header-right">
+        <span class="codex-badge ready" id="claudeBadge">Checking...</span>
+        <span class="codex-caret" id="claudeCaret">&#9662;</span>
+      </div>
+    </div>
+    <div class="codex-body" id="claudeBody">
+      <div class="codex-status" id="claudeStatus">Checking Claude status...</div>
+      <div class="codex-meta">
+        <div class="codex-meta-row"><span>CLI</span><strong id="claudeCliStatus">Checking...</strong></div>
+        <div class="codex-meta-row"><span>Account</span><strong id="claudeAccountStatus">Checking...</strong></div>
+        <div class="codex-meta-row"><span>Bridge</span><strong id="claudeBridgeStatus">Not started</strong></div>
+        <div class="codex-meta-row"><span>Endpoint</span><strong id="claudeEndpointStatus">Not added yet</strong></div>
+        <div class="codex-meta-row"><span>Models</span><strong id="claudeModelsStatus">Checking...</strong></div>
+      </div>
+      <div class="codex-actions">
+        <button class="codex-primary-btn" id="connectClaudeBtn">Connect to Claude CLI</button>
+        <button class="codex-secondary-btn" id="signInClaudeBtn">Sign In</button>
+        <button class="codex-secondary-btn" id="refreshClaudeBtn">Refresh</button>
+      </div>
+      <p class="hint">This keeps Claude chat-first inside PocketAI for now. PocketAI tools still stay in charge of the coding workflow.</p>
     </div>
   </div>
 
@@ -420,15 +454,23 @@ export function getSettingsHtml(): string {
   </button>
 
   <div class="add-form hidden" id="addForm">
-    <input type="text" id="newName" placeholder="Name (e.g. Home Server)" />
-    <input type="text" id="newUrl" placeholder="URL (e.g. http://192.168.1.50:39457)" />
+    <select id="newProviderPreset">
+      <option value="opencode-go">OpenCode Go</option>
+      <option value="xai">Grok (xAI)</option>
+      <option value="custom">Custom</option>
+    </select>
+    <input type="text" id="newName" placeholder="Name (optional, e.g. OpenCode Go)" />
+    <div class="form-row hidden" id="newUrlRow">
+      <input type="text" id="newUrl" placeholder="URL (e.g. http://192.168.1.50:39457)" />
+    </div>
+    <input type="password" id="newApiKey" placeholder="API Key" />
     <div class="add-form-actions">
       <button class="add-submit-btn" id="addEndpointBtn">Add <span class="plus-icon">+</span></button>
       <button class="add-cancel-btn" id="addCancelBtn">Cancel</button>
     </div>
   </div>
 
-  <p class="hint">Add multiple PocketAI instances running on different machines. The active endpoint is used for chat.</p>
+  <p class="hint">Choose a built-in provider like OpenCode Go or Grok (xAI), or switch to Custom for your own endpoint URL.</p>
 
   <div class="divider"></div>
 
@@ -440,12 +482,15 @@ export function getSettingsHtml(): string {
   const addForm = document.getElementById("addForm");
   const addBtn = document.getElementById("addEndpointBtn");
   const addCancelBtn = document.getElementById("addCancelBtn");
+  const newProviderPresetSelect = document.getElementById("newProviderPreset");
   const newNameInput = document.getElementById("newName");
+  const newUrlRow = document.getElementById("newUrlRow");
   const newUrlInput = document.getElementById("newUrl");
+  const newApiKeyInput = document.getElementById("newApiKey");
   const openChatBtn = document.getElementById("openChatBtn");
   const codexCard = document.getElementById("codexCard");
   const codexBadge = document.getElementById("codexBadge");
-  const codexHeader = document.querySelector(".codex-header");
+  const codexHeader = document.getElementById("codexHeader");
   const codexBody = document.getElementById("codexBody");
   const codexCaret = document.getElementById("codexCaret");
   const codexStatus = document.getElementById("codexStatus");
@@ -457,9 +502,64 @@ export function getSettingsHtml(): string {
   const connectCodexBtn = document.getElementById("connectCodexBtn");
   const signInCodexBtn = document.getElementById("signInCodexBtn");
   const refreshCodexBtn = document.getElementById("refreshCodexBtn");
+  const claudeCard = document.getElementById("claudeCard");
+  const claudeBadge = document.getElementById("claudeBadge");
+  const claudeHeader = document.getElementById("claudeHeader");
+  const claudeBody = document.getElementById("claudeBody");
+  const claudeCaret = document.getElementById("claudeCaret");
+  const claudeStatus = document.getElementById("claudeStatus");
+  const claudeCliStatus = document.getElementById("claudeCliStatus");
+  const claudeAccountStatus = document.getElementById("claudeAccountStatus");
+  const claudeBridgeStatus = document.getElementById("claudeBridgeStatus");
+  const claudeEndpointStatus = document.getElementById("claudeEndpointStatus");
+  const claudeModelsStatus = document.getElementById("claudeModelsStatus");
+  const connectClaudeBtn = document.getElementById("connectClaudeBtn");
+  const signInClaudeBtn = document.getElementById("signInClaudeBtn");
+  const refreshClaudeBtn = document.getElementById("refreshClaudeBtn");
   let currentState = null;
   const expandedEndpoints = new Set();
   let codexExpanded = false;
+  let claudeExpanded = false;
+  const PROVIDER_PRESETS = {
+    "opencode-go": {
+      url: "https://opencode.ai/zen/go",
+      hideUrl: true,
+      namePlaceholder: "Name (optional, e.g. OpenCode Go)",
+      urlPlaceholder: "URL handled automatically",
+      apiKeyPlaceholder: "OpenCode Go API Key",
+    },
+    "xai": {
+      url: "https://api.x.ai",
+      hideUrl: true,
+      namePlaceholder: "Name (optional, e.g. Grok)",
+      urlPlaceholder: "URL handled automatically",
+      apiKeyPlaceholder: "xAI API Key",
+    },
+    "custom": {
+      url: "",
+      hideUrl: false,
+      namePlaceholder: "Name (optional, e.g. Home Server)",
+      urlPlaceholder: "URL (e.g. http://192.168.1.50:39457)",
+      apiKeyPlaceholder: "API Key (optional)",
+    },
+  };
+
+  function applyProviderPreset() {
+    const presetKey = newProviderPresetSelect.value || "custom";
+    const preset = PROVIDER_PRESETS[presetKey] || PROVIDER_PRESETS.custom;
+    newNameInput.placeholder = preset.namePlaceholder;
+    newApiKeyInput.placeholder = preset.apiKeyPlaceholder;
+    newUrlInput.placeholder = preset.urlPlaceholder;
+    newUrlRow.classList.toggle("hidden", !!preset.hideUrl);
+    if (preset.hideUrl) {
+      newUrlInput.value = preset.url;
+    } else if (
+      newUrlInput.value === PROVIDER_PRESETS["opencode-go"].url ||
+      newUrlInput.value === PROVIDER_PRESETS["xai"].url
+    ) {
+      newUrlInput.value = "";
+    }
+  }
 
   openChatBtn.addEventListener("click", () => {
     vscode.postMessage({ type: "openChat" });
@@ -482,27 +582,55 @@ export function getSettingsHtml(): string {
     codexBody.classList.toggle("open", codexExpanded);
     codexCaret.classList.toggle("open", codexExpanded);
   });
+  connectClaudeBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "connectClaude" });
+  });
+  signInClaudeBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "signInClaude" });
+  });
+  refreshClaudeBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "refreshClaudeStatus" });
+  });
+  claudeHeader.addEventListener("click", () => {
+    claudeExpanded = !claudeExpanded;
+    claudeCard.classList.toggle("collapsed", !claudeExpanded);
+    claudeBody.classList.toggle("open", claudeExpanded);
+    claudeCaret.classList.toggle("open", claudeExpanded);
+  });
 
   addTriggerBtn.addEventListener("click", () => {
     addTriggerBtn.style.display = "none";
     addForm.classList.remove("hidden");
+    applyProviderPreset();
     newNameInput.focus();
   });
 
   addCancelBtn.addEventListener("click", () => {
     addForm.classList.add("hidden");
     addTriggerBtn.style.display = "flex";
+    newProviderPresetSelect.value = "opencode-go";
     newNameInput.value = "";
     newUrlInput.value = "";
+    newApiKeyInput.value = "";
+    applyProviderPreset();
+  });
+
+  newProviderPresetSelect.addEventListener("change", () => {
+    applyProviderPreset();
   });
 
   addBtn.addEventListener("click", () => {
+    const providerPreset = newProviderPresetSelect.value || "custom";
     const name = newNameInput.value.trim();
     const url = newUrlInput.value.trim();
-    if (!name || !url) return;
-    vscode.postMessage({ type: "addEndpoint", name, url });
+    const apiKey = newApiKeyInput.value.trim();
+    if (!url) return;
+    vscode.postMessage({ type: "addEndpoint", providerPreset, name, url, apiKey });
+    newProviderPresetSelect.value = "opencode-go";
     newNameInput.value = "";
     newUrlInput.value = "";
+    newApiKeyInput.value = "";
+    applyProviderPreset();
     addForm.classList.add("hidden");
     addTriggerBtn.style.display = "flex";
   });
@@ -556,7 +684,7 @@ export function getSettingsHtml(): string {
       ? "Connecting..."
       : isConnected && models.length > 0
         ? "Connected"
-        : "Connect to Codex";
+        : "Connect to Codex CLI";
     connectCodexBtn.disabled = !!codex.busy || (isConnected && models.length > 0) || !codex.available;
 
     signInCodexBtn.style.display = codex.loggedIn ? "none" : "inline-flex";
@@ -572,6 +700,66 @@ export function getSettingsHtml(): string {
     codexReasoningSelect.innerHTML = reasoningHtml;
     codexReasoningSelect.disabled =
       !!codex.busy || !codex.available || reasoningOptions.length === 0;
+  }
+
+  function renderClaude(state) {
+    const claude = state.claude || {};
+    const models = Array.isArray(claude.models) ? claude.models : [];
+    const isConnected = !!(claude.available && claude.loggedIn && claude.endpointActive && claude.endpointHealthy);
+    const isReady = !!(claude.available && claude.loggedIn && claude.bridgeRunning);
+
+    let badgeLabel = "Connect";
+    let badgeClass = "ready";
+    if (claude.busy) {
+      badgeLabel = "Working";
+      badgeClass = "ready";
+    } else if (isConnected) {
+      badgeLabel = "Connected";
+      badgeClass = "connected";
+    } else if (!claude.available) {
+      badgeLabel = "Not Found";
+      badgeClass = "offline";
+    } else if (!claude.loggedIn) {
+      badgeLabel = "Sign In";
+      badgeClass = "warning";
+    } else if (isReady) {
+      badgeLabel = "Ready";
+      badgeClass = "ready";
+    }
+
+    claudeBadge.textContent = badgeLabel;
+    claudeBadge.className = "codex-badge " + badgeClass;
+
+    const statusText = claude.status || "One click will add the endpoint and start Claude for you.";
+    claudeStatus.textContent = statusText;
+    claudeStatus.className = "codex-status" + (claude.error ? " error" : "");
+
+    claudeCliStatus.textContent = claude.available ? "Detected" : "Not found";
+    claudeAccountStatus.textContent = claude.available
+      ? (claude.loginLabel || (claude.loggedIn ? "Logged in" : "Sign in required"))
+      : "Unavailable";
+    claudeBridgeStatus.textContent = claude.bridgeRunning
+      ? "Running on 127.0.0.1:39460"
+      : "Not started";
+    claudeEndpointStatus.textContent = claude.endpointActive
+      ? (claude.endpointHealthy ? "Active and healthy" : "Active")
+      : claude.endpointConfigured
+        ? "Saved"
+        : "Not added yet";
+    claudeModelsStatus.textContent = models.length
+      ? models.map((model) => model.displayName || model.id || "").filter(Boolean).join(", ")
+      : "Waiting for bridge";
+
+    connectClaudeBtn.textContent = claude.busy
+      ? "Connecting..."
+      : isConnected && models.length > 0
+        ? "Connected"
+        : "Connect to Claude CLI";
+    connectClaudeBtn.disabled = !!claude.busy || (isConnected && models.length > 0) || !claude.available;
+
+    signInClaudeBtn.style.display = claude.loggedIn ? "none" : "inline-flex";
+    signInClaudeBtn.disabled = !!claude.busy || !claude.available;
+    refreshClaudeBtn.disabled = !!claude.busy;
   }
 
   function renderEndpoints(state) {
@@ -592,7 +780,6 @@ export function getSettingsHtml(): string {
       header.innerHTML =
         '<div class="endpoint-header-left">' +
           '<div class="endpoint-name">' + escapeHtml(ep.name) + '</div>' +
-          '<div class="endpoint-url">' + escapeHtml(ep.url) + '</div>' +
         '</div>' +
         '<div class="endpoint-header-right">' +
           '<span class="endpoint-status-dot ' + (ep.healthy ? "green" : "red") + '"></span>' +
@@ -609,6 +796,7 @@ export function getSettingsHtml(): string {
           (ep.healthy ? "Connected" : "Unreachable") +
           (latency ? " &middot; " + latency : "") +
         '</div>' +
+        '<div class="endpoint-url">' + escapeHtml(ep.url) + '</div>' +
         (isManagedEndpoint
           ? '<div class="endpoint-status-text" style="margin-top:6px;font-size:12px;opacity:0.8">Managed by the PocketAI app.</div>'
           : '') +
@@ -713,9 +901,12 @@ export function getSettingsHtml(): string {
     if (msg.type === "settingsState") {
       currentState = msg;
       renderCodex(msg);
+      renderClaude(msg);
       renderEndpoints(msg);
     }
   });
+
+  applyProviderPreset();
 </script>
 </body>
 </html>`;

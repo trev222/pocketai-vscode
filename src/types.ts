@@ -348,11 +348,16 @@ export type ExtensionToWebviewMessage = {
   runtimeHealth: HarnessRuntimeHealth;
 } | {
   type: "streamStart";
+  label?: string;
+  detail?: string;
 } | {
   type: "streamChunk";
   text: string;
 } | {
   type: "streamToolCallDetected";
+  toolName?: string;
+  toolTarget?: string;
+  detail?: string;
 } | {
   type: "streamEnd";
   fullText: string;

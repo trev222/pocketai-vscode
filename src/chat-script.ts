@@ -52,8 +52,13 @@ export function getChatScript(brandIconUri: string): string {
     let streamingText = "";
     let streamingEl = null;
     let streamingToolMode = false;
+    let streamingToolHint = null;
+    let streamingBaseLabel = "";
+    let streamingBaseDetail = "";
     let streamStartTime = 0;
     let streamChunkCount = 0;
+    let spinnerVerbIndex = 0;
+    let spinnerVerbTimer = null;
     const messageStats = new Map();
     let editingSessionId = "";
     let isEditingSessionTitle = false;
@@ -70,6 +75,110 @@ export function getChatScript(brandIconUri: string): string {
       auto: "Auto",
       plan: "Plan",
     };
+    const DEFAULT_STREAM_LABEL = "Thinking...";
+    const DEFAULT_STREAM_DETAIL = "Analyzing the request and deciding whether tools are needed.";
+    const STREAM_SPINNER_VERBS = [
+      "Womanizing",
+      "Gaslighting",
+      "Rizzing",
+      "Flexing",
+      "Sigma-grinding",
+      "Ratio-ing",
+      "Overthinking",
+      "Procrastinating",
+      "Redpilling",
+      "Hallucinating",
+      "Mogging",
+      "Looksmaxxing",
+      "Aura-farming",
+      "Cookin",
+      "Smooth-talking",
+      "Synthesizing",
+      "Refactoring",
+      "Interpolating",
+      "Vectorizing",
+      "Tokenizing",
+      "Backpropagating",
+      "Quantizing",
+      "Hydrating",
+      "Orchestrating",
+      "Reconciling",
+      "Normalizing",
+      "Indexing",
+      "Sharding",
+      "Caching",
+      "Diffing",
+      "Bundling",
+      "Provisioning",
+      "Linting",
+      "Profiling",
+      "Speculating",
+      "Postulating",
+      "Ruminating",
+      "Dissecting",
+      "Deciphering",
+      "Untangling",
+      "Deconstructing",
+      "Reassembling",
+      "Hypothesizing",
+      "Cross-referencing",
+      "Recalibrating",
+      "Contextualizing",
+      "Reframing",
+      "Consolidating",
+      "Triangulating",
+      "Resolving",
+      "Aligning",
+      "Bridging",
+      "Clarifying",
+      "Distilling",
+      "Tinkering",
+      "Wiggling",
+      "Bouncing",
+      "Scooting",
+      "Snickering",
+      "Whirring",
+      "Fizzing",
+      "Zipping",
+      "Doodling",
+      "Wobbling",
+      "Skittering",
+      "Puttering",
+      "Blooping",
+      "Zazzing",
+      "Flitting",
+      "Swooshing",
+      "Chirping",
+      "Ticking",
+      "Buzzing",
+      "Gliding",
+      "Scanning",
+      "Mapping",
+      "Tracing",
+      "Parsing",
+      "Balancing",
+      "Harmonizing",
+      "Sequencing",
+      "Weaving",
+      "Merging",
+      "Splitting",
+      "Routing",
+      "Filtering",
+      "Sorting",
+      "Matching",
+      "Comparing",
+      "Expanding",
+      "Compressing",
+      "Shaping",
+      "Framing",
+      "Linking",
+      "Anchoring",
+      "Stabilizing",
+      "Calibrating",
+      "Fine-tuning",
+      "Polishing",
+      "Finalizing"
+    ];
 
     function formatReasoningLabel(reasoningEffort) {
       if (!reasoningEffort) return "Auto";
@@ -474,6 +583,14 @@ export function getChatScript(brandIconUri: string): string {
       }
 
       if (!summary) {
+        match = text.match(/^Content from (https?:\\/\\/\\S+):/im);
+        if (match) {
+          summary = truncateText("Fetched page: " + match[1], 160);
+          detailTitle = "Fetched content";
+        }
+      }
+
+      if (!summary) {
         match = text.match(/^Workspace symbols matching "([^"]+)"/im);
         if (match) {
           summary = 'Searched workspace symbols: "' + match[1] + '"';
@@ -543,6 +660,340 @@ export function getChatScript(brandIconUri: string): string {
       };
     }
 
+    function compactActivityPath(value) {
+      const text = String(value || "").trim();
+      if (!text) {
+        return { primary: "", secondary: "" };
+      }
+
+      const normalized = text.replace(/\\\\/g, "/");
+      const pieces = normalized.split("/").filter(Boolean);
+      const primary = pieces[pieces.length - 1] || normalized;
+      return {
+        primary,
+        secondary: primary !== normalized ? normalized : "",
+      };
+    }
+
+    function compactNetworkTarget(value) {
+      const text = String(value || "").trim();
+      if (!text) {
+        return { primary: "", secondary: "", host: "" };
+      }
+      try {
+        const parsed = new URL(text);
+        const path = (parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : "") + (parsed.search || "");
+        const compactPath = path.length > 48 ? path.slice(0, 47) + "…" : path;
+        const primary = compactPath ? parsed.host + compactPath : parsed.host;
+        return {
+          primary,
+          secondary: text,
+          host: parsed.host,
+        };
+      } catch {
+        return { primary: text, secondary: "", host: "" };
+      }
+    }
+
+    function describeAssistantToolPlan(toolCalls) {
+      const calls = Array.isArray(toolCalls) ? toolCalls : [];
+      if (!calls.length) return "";
+      const types = new Set(calls.map((toolCall) => String(toolCall?.type || "")));
+
+      if (types.has("web_fetch")) {
+        return "Checking the referenced page before answering.";
+      }
+      if (types.has("web_search")) {
+        return "Looking up current information before answering.";
+      }
+      if (types.has("read_file") || types.has("open_file")) {
+        return calls.length > 1
+          ? "Inspecting the relevant files before responding."
+          : "Inspecting the relevant file before responding.";
+      }
+      if (types.has("edit_file") || types.has("write_file") || types.has("apply_code_action")) {
+        return "Reviewing the relevant code before making a change.";
+      }
+      if (
+        types.has("grep") ||
+        types.has("glob") ||
+        types.has("list_files") ||
+        types.has("workspace_symbols") ||
+        types.has("document_symbols") ||
+        types.has("find_references")
+      ) {
+        return "Scanning the workspace to find the right files and symbols.";
+      }
+      if (types.has("diagnostics") || types.has("code_actions") || types.has("hover_symbol")) {
+        return "Checking editor context before deciding on the next step.";
+      }
+      if (types.has("run_command") || types.has("git_status") || types.has("git_diff")) {
+        return "Verifying the environment before answering.";
+      }
+      return "Planning the next step and gathering evidence with tools.";
+    }
+
+    function describeToolActivity(tc) {
+      const fileTarget = compactActivityPath(tc.filePath || "");
+      switch (tc.type) {
+        case "read_file":
+          return { verb: "Read", target: fileTarget.primary, secondary: fileTarget.secondary, codeTarget: true };
+        case "write_file":
+        case "edit_file":
+          return { verb: "Write", target: fileTarget.primary, secondary: fileTarget.secondary, codeTarget: true };
+        case "open_file":
+          return { verb: "Open", target: fileTarget.primary, secondary: fileTarget.secondary, codeTarget: true };
+        case "open_definition":
+        case "go_to_definition":
+          return { verb: "Open definition", target: fileTarget.primary || "symbol", secondary: fileTarget.secondary, codeTarget: true };
+        case "find_references":
+          return { verb: "Find references", target: fileTarget.primary || "symbol", secondary: fileTarget.secondary, codeTarget: true };
+        case "document_symbols":
+        case "workspace_symbols":
+          return { verb: "Inspect symbols", target: tc.query || fileTarget.primary || "workspace", secondary: fileTarget.secondary, codeTarget: !!fileTarget.primary };
+        case "hover_symbol":
+          return { verb: "Inspect symbol", target: fileTarget.primary || "current symbol", secondary: fileTarget.secondary, codeTarget: true };
+        case "code_actions":
+          return { verb: "Check code actions", target: fileTarget.primary || "current file", secondary: fileTarget.secondary, codeTarget: true };
+        case "apply_code_action":
+          return { verb: "Apply code action", target: tc.actionTitle || fileTarget.primary || "selected action", secondary: fileTarget.secondary, codeTarget: !!fileTarget.primary };
+        case "diagnostics":
+          return { verb: "Check diagnostics", target: fileTarget.primary || "workspace", secondary: fileTarget.secondary, codeTarget: !!fileTarget.primary };
+        case "web_search":
+          return { verb: "Search", target: tc.query || "the web", secondary: "", codeTarget: false };
+        case "web_fetch":
+          {
+            const networkTarget = compactNetworkTarget(tc.url || "");
+            return {
+              verb: "Web Fetch",
+              target: networkTarget.primary || tc.url || "page",
+              secondary: networkTarget.secondary && networkTarget.secondary !== networkTarget.primary
+                ? networkTarget.secondary
+                : "",
+              codeTarget: false,
+            };
+          }
+        case "run_command":
+          return { verb: "Run", target: tc.command || "command", secondary: "", codeTarget: true };
+        case "grep":
+          return { verb: "Search", target: tc.pattern || "code", secondary: tc.glob || "", codeTarget: true };
+        case "glob":
+        case "list_files":
+          return { verb: "Find", target: tc.glob || tc.globPath || tc.filePath || "files", secondary: "", codeTarget: true };
+        case "git_status":
+          return { verb: "Check", target: "git status", secondary: "", codeTarget: true };
+        case "git_diff":
+          return { verb: "Check", target: "git diff", secondary: "", codeTarget: true };
+        case "git_commit":
+          return { verb: "Commit", target: tc.commitMessage || "changes", secondary: "", codeTarget: false };
+        case "list_tools":
+          return { verb: "Inspect", target: "tools", secondary: "", codeTarget: false };
+        case "list_skills":
+          return { verb: "Inspect", target: "skills", secondary: "", codeTarget: false };
+        case "run_skill":
+          return { verb: "Use", target: tc.skillName || "skill", secondary: "", codeTarget: false };
+        case "todo_write":
+          return { verb: "Update", target: "task list", secondary: "", codeTarget: false };
+        case "memory_read":
+          return { verb: "Read", target: tc.memoryName || tc.memoryType || "memory", secondary: "", codeTarget: false };
+        case "memory_write":
+          return { verb: "Write", target: tc.memoryName || tc.memoryType || "memory", secondary: "", codeTarget: false };
+        case "memory_delete":
+          return { verb: "Delete", target: tc.memoryName || tc.memoryType || "memory", secondary: "", codeTarget: false };
+        default:
+          return {
+            verb: tc.type.replace(/_/g, " "),
+            target: fileTarget.primary || tc.query || tc.command || tc.url || "",
+            secondary: fileTarget.secondary,
+            codeTarget: !!fileTarget.primary || !!tc.command,
+          };
+      }
+    }
+
+    function createActivityDetails(detailTitle, details, options) {
+      const detailText = String(details || "").trim();
+      if (!detailText) {
+        return null;
+      }
+
+      const wrap = document.createElement("div");
+      wrap.className = "activity-details";
+
+      const detailsWrap = document.createElement("div");
+      detailsWrap.className = "tool-details-content";
+      detailsWrap.innerHTML = renderInlineMarkdown(detailText);
+
+      const collapsedByDefault = options?.collapsedByDefault !== false;
+      detailsWrap.style.display = collapsedByDefault ? "none" : "";
+
+      const toggle = document.createElement("button");
+      toggle.className = "tool-details-toggle";
+      toggle.type = "button";
+      toggle.textContent = collapsedByDefault ? "Show details" : "Hide details";
+      toggle.title = detailTitle || "Details";
+      toggle.onclick = () => {
+        const expanded = detailsWrap.style.display !== "none";
+        detailsWrap.style.display = expanded ? "none" : "";
+        toggle.textContent = expanded ? "Show details" : "Hide details";
+      };
+
+      wrap.appendChild(toggle);
+      wrap.appendChild(detailsWrap);
+      return wrap;
+    }
+
+    function renderActivityRow(options) {
+      const row = document.createElement("div");
+      row.className = "tool-call-card" + (options.variant ? " activity-variant-" + options.variant : "");
+
+      const header = document.createElement("div");
+      header.className = "tool-call-header tool-call-header-inline";
+
+      const left = document.createElement("div");
+      left.className = "tool-call-main";
+
+      const line = document.createElement("div");
+      line.className = "tool-call-line";
+
+      const dot = document.createElement("span");
+      dot.className = "tool-call-dot " + (options.status || "executed");
+      line.appendChild(dot);
+
+      const verbEl = document.createElement("span");
+      verbEl.className = "tool-call-verb";
+      verbEl.textContent = options.verb || "Used";
+      line.appendChild(verbEl);
+
+      if (options.target) {
+        const targetEl = document.createElement("span");
+        targetEl.className = "tool-call-path" + (options.codeTarget ? " tool-call-inline-code" : "");
+        targetEl.textContent = options.target;
+        line.appendChild(targetEl);
+      }
+
+      left.appendChild(line);
+
+      if (options.meta) {
+        const metaEl = document.createElement("div");
+        metaEl.className = "tool-call-meta";
+        metaEl.textContent = options.meta;
+        left.appendChild(metaEl);
+      }
+
+      if (options.secondary) {
+        const secondaryEl = document.createElement("div");
+        secondaryEl.className = "tool-call-secondary";
+        secondaryEl.textContent = options.secondary;
+        left.appendChild(secondaryEl);
+      }
+
+      const detailsEl = createActivityDetails(
+        options.detailTitle,
+        options.details,
+        { collapsedByDefault: options.collapsedByDefault },
+      );
+      if (detailsEl) {
+        left.appendChild(detailsEl);
+      }
+
+      header.appendChild(left);
+
+      if (options.badgeText) {
+        const badge = document.createElement("span");
+        badge.className = "tool-status " + (options.status || "executed");
+        badge.textContent = options.badgeText;
+        header.appendChild(badge);
+      }
+
+      row.appendChild(header);
+      return row;
+    }
+
+    function buildApprovalPrompt(toolCall, approval, pendingDiffSet, queuedCount) {
+      const type = String(toolCall?.type || approval?.toolType || "tool_call");
+      const fileTarget = compactActivityPath(toolCall?.filePath || approval?.filePath || "");
+      const networkTarget = compactNetworkTarget(toolCall?.url || "");
+      const diffReady = toolCall && pendingDiffSet.has(toolCall.id);
+
+      let title = "Allow this action?";
+      let subject = describePendingToolCall(toolCall, approval);
+      let note = "PocketAI needs your confirmation before it continues.";
+
+      switch (type) {
+        case "web_fetch":
+          title = "Allow fetching this URL?";
+          subject = toolCall?.url || approval?.filePath || subject;
+          note = "PocketAI wants to fetch this page before it answers.";
+          break;
+        case "web_search":
+          title = "Allow searching the web?";
+          subject = toolCall?.query || subject;
+          note = "PocketAI wants to look up current information before it answers.";
+          break;
+        case "run_command":
+          title = "Allow running this command?";
+          subject = toolCall?.command || subject;
+          note = "PocketAI wants to execute a shell command in your workspace.";
+          break;
+        case "read_file":
+        case "open_file":
+          title = "Allow reading this file?";
+          subject = toolCall?.filePath || approval?.filePath || subject;
+          note = "PocketAI wants to inspect a file before it responds.";
+          break;
+        case "edit_file":
+        case "write_file":
+        case "apply_code_action":
+          title = diffReady ? "Allow applying this change?" : "Allow editing this file?";
+          subject = toolCall?.filePath || approval?.filePath || subject;
+          note = diffReady
+            ? "PocketAI has a diff ready for review."
+            : "PocketAI wants to change a file in your workspace.";
+          break;
+        case "git_commit":
+          title = "Allow creating this commit?";
+          subject = toolCall?.commitMessage || subject;
+          note = "PocketAI wants to create a git commit.";
+          break;
+        case "grep":
+        case "glob":
+        case "list_files":
+          title = "Allow workspace inspection?";
+          note = "PocketAI wants to inspect your workspace before it answers.";
+          break;
+      }
+
+      const detailBits = [];
+      if (networkTarget.host) {
+        detailBits.push(networkTarget.host);
+      } else if (fileTarget.secondary) {
+        detailBits.push(fileTarget.secondary);
+      }
+      if (queuedCount > 0) {
+        detailBits.push(queuedCount + " more queued");
+      }
+      if (diffReady) {
+        detailBits.push("diff ready");
+      }
+
+      return {
+        type,
+        title,
+        subject,
+        note,
+        detail: detailBits.join(" · "),
+        diffReady,
+      };
+    }
+
+    function isToolPlaceholderAssistantMessage(entry) {
+      if (!entry || entry.role !== "assistant" || !entry.toolCalls || !entry.toolCalls.length) {
+        return false;
+      }
+      const text = String(entry.content || "").trim();
+      return /^\\[Calling tools?:[\\s\\S]*\\]$/i.test(text);
+    }
+
     function createCollapsibleToolDetails(summary, detailTitle, details, options) {
       const shell = document.createElement("div");
       shell.className = "tool-details-shell";
@@ -601,6 +1052,7 @@ export function getChatScript(brandIconUri: string): string {
     function describePendingToolCall(toolCall, approval) {
       if (toolCall) {
         if (toolCall.type === "web_search") return toolCall.query || "Search the web";
+        if (toolCall.type === "web_fetch") return toolCall.url || "Fetch URL";
         if (toolCall.type === "run_command") return toolCall.command || "Run command";
         if (toolCall.type === "grep") {
           return toolCall.pattern
@@ -642,9 +1094,32 @@ export function getChatScript(brandIconUri: string): string {
 
       approvalDock.style.display = "";
       approvalDock.classList.add("active");
+      const currentApproval = pendingApprovals[0];
+      const queuedCount = Math.max(0, pendingApprovals.length - 1);
+      const currentToolCall = findToolCallById(payload, currentApproval.toolCallId);
+      const prompt = buildApprovalPrompt(
+        currentToolCall,
+        currentApproval,
+        pendingDiffSet,
+        queuedCount,
+      );
 
       const shell = document.createElement("div");
       shell.className = "approval-dock-shell";
+
+      if (queuedCount > 0) {
+        const stack = document.createElement("div");
+        stack.className = "approval-dock-stack";
+        for (let i = 0; i < Math.min(2, queuedCount); i++) {
+          const layer = document.createElement("div");
+          layer.className = "approval-dock-stack-layer layer-" + (i + 1);
+          stack.appendChild(layer);
+        }
+        shell.appendChild(stack);
+      }
+
+      const card = document.createElement("div");
+      card.className = "approval-dock-card";
 
       const header = document.createElement("div");
       header.className = "approval-dock-header";
@@ -654,118 +1129,97 @@ export function getChatScript(brandIconUri: string): string {
 
       const label = document.createElement("span");
       label.className = "approval-dock-label";
-      label.textContent = pendingApprovals.length === 1 ? "Approval Required" : "Approvals Required";
+      label.textContent = "Approval Required";
       titleWrap.appendChild(label);
+
+      const title = document.createElement("div");
+      title.className = "approval-dock-title";
+      title.textContent = prompt.title;
+      titleWrap.appendChild(title);
 
       const copy = document.createElement("span");
       copy.className = "approval-dock-copy";
-      copy.textContent =
-        pendingApprovals.length === 1
-          ? "1 action is waiting for confirmation."
-          : pendingApprovals.length + " actions are waiting for confirmation.";
+      copy.textContent = prompt.note;
       titleWrap.appendChild(copy);
       header.appendChild(titleWrap);
 
       const badge = document.createElement("span");
       badge.className = "harness-badge pending";
-      badge.textContent = pendingApprovals.length + " pending";
+      badge.textContent = pendingApprovals.length === 1 ? "1 pending" : pendingApprovals.length + " pending";
       header.appendChild(badge);
-      shell.appendChild(header);
+      card.appendChild(header);
 
-      if (pendingApprovals.length > 1) {
-        const bulkActions = document.createElement("div");
-        bulkActions.className = "approval-dock-actions";
+      const subject = document.createElement("div");
+      subject.className = "approval-dock-path approval-dock-subject";
+      subject.textContent = prompt.subject;
+      card.appendChild(subject);
 
+      if (prompt.detail) {
+        const detail = document.createElement("div");
+        detail.className = "approval-dock-detail";
+        detail.textContent = prompt.detail;
+        card.appendChild(detail);
+      }
+
+      const actionRow = document.createElement("div");
+      actionRow.className = "approval-dock-actions approval-dock-primary-actions";
+
+      const approveBtn = document.createElement("button");
+      approveBtn.className = "tool-btn tool-btn-approve";
+      approveBtn.textContent = "Yes";
+      approveBtn.disabled = !!payload.busy;
+      approveBtn.onclick = () =>
+        vscode.postMessage({ type: "approveToolCall", toolCallId: currentApproval.toolCallId });
+      actionRow.appendChild(approveBtn);
+
+      const rejectBtn = document.createElement("button");
+      rejectBtn.className = "tool-btn tool-btn-reject";
+      rejectBtn.textContent = "No";
+      rejectBtn.disabled = !!payload.busy;
+      rejectBtn.onclick = () =>
+        vscode.postMessage({ type: "rejectToolCall", toolCallId: currentApproval.toolCallId });
+      actionRow.appendChild(rejectBtn);
+
+      card.appendChild(actionRow);
+
+      const secondaryRow = document.createElement("div");
+      secondaryRow.className = "approval-dock-actions approval-dock-secondary-actions";
+
+      if (
+        currentToolCall &&
+        pendingDiffSet.has(currentApproval.toolCallId) &&
+        (currentToolCall.type === "edit_file" || currentToolCall.type === "write_file")
+      ) {
+        const previewBtn = document.createElement("button");
+        previewBtn.className = "tool-btn";
+        previewBtn.textContent = "View Diff";
+        previewBtn.disabled = !!payload.busy;
+        previewBtn.onclick = () =>
+          vscode.postMessage({ type: "openDiff", toolCallId: currentApproval.toolCallId });
+        secondaryRow.appendChild(previewBtn);
+      }
+
+      if (queuedCount > 0) {
         const approveAll = document.createElement("button");
-        approveAll.className = "tool-btn tool-btn-approve";
-        approveAll.textContent = "Accept All";
+        approveAll.className = "tool-btn";
+        approveAll.textContent = "Yes, allow remaining";
         approveAll.disabled = !!payload.busy;
         approveAll.onclick = () => vscode.postMessage({ type: "approveAllToolCalls" });
-        bulkActions.appendChild(approveAll);
+        secondaryRow.appendChild(approveAll);
 
         const rejectAll = document.createElement("button");
-        rejectAll.className = "tool-btn tool-btn-reject";
-        rejectAll.textContent = "Decline All";
+        rejectAll.className = "tool-btn";
+        rejectAll.textContent = "No, decline all";
         rejectAll.disabled = !!payload.busy;
         rejectAll.onclick = () => vscode.postMessage({ type: "rejectAllToolCalls" });
-        bulkActions.appendChild(rejectAll);
-
-        shell.appendChild(bulkActions);
+        secondaryRow.appendChild(rejectAll);
       }
 
-      const list = document.createElement("div");
-      list.className = "approval-dock-list";
-
-      for (const approval of pendingApprovals) {
-        const toolCall = findToolCallById(payload, approval.toolCallId);
-        const row = document.createElement("div");
-        row.className = "approval-dock-item";
-
-        const info = document.createElement("div");
-        info.className = "approval-dock-info";
-
-        const top = document.createElement("div");
-        top.className = "approval-dock-top";
-
-        const type = document.createElement("span");
-        type.className = "approval-dock-type";
-        type.textContent = (toolCall?.type || approval.toolType || "tool_call").replace(/_/g, " ");
-        top.appendChild(type);
-
-        if (pendingDiffSet.has(approval.toolCallId)) {
-          const diffBadge = document.createElement("span");
-          diffBadge.className = "approval-dock-note";
-          diffBadge.textContent = "Diff ready";
-          top.appendChild(diffBadge);
-        }
-
-        info.appendChild(top);
-
-        const path = document.createElement("div");
-        path.className = "approval-dock-path";
-        path.textContent = describePendingToolCall(toolCall, approval);
-        info.appendChild(path);
-
-        row.appendChild(info);
-
-        const actions = document.createElement("div");
-        actions.className = "approval-dock-actions";
-
-        if (
-          toolCall &&
-          pendingDiffSet.has(approval.toolCallId) &&
-          (toolCall.type === "edit_file" || toolCall.type === "write_file")
-        ) {
-          const previewBtn = document.createElement("button");
-          previewBtn.className = "tool-btn";
-          previewBtn.textContent = "View Diff";
-          previewBtn.disabled = !!payload.busy;
-          previewBtn.onclick = () =>
-            vscode.postMessage({ type: "openDiff", toolCallId: approval.toolCallId });
-          actions.appendChild(previewBtn);
-        }
-
-        const approveBtn = document.createElement("button");
-        approveBtn.className = "tool-btn tool-btn-approve";
-        approveBtn.textContent = "Accept";
-        approveBtn.disabled = !!payload.busy;
-        approveBtn.onclick = () =>
-          vscode.postMessage({ type: "approveToolCall", toolCallId: approval.toolCallId });
-        actions.appendChild(approveBtn);
-
-        const rejectBtn = document.createElement("button");
-        rejectBtn.className = "tool-btn tool-btn-reject";
-        rejectBtn.textContent = "Decline";
-        rejectBtn.disabled = !!payload.busy;
-        rejectBtn.onclick = () =>
-          vscode.postMessage({ type: "rejectToolCall", toolCallId: approval.toolCallId });
-        actions.appendChild(rejectBtn);
-
-        row.appendChild(actions);
-        list.appendChild(row);
+      if (secondaryRow.childElementCount) {
+        card.appendChild(secondaryRow);
       }
 
-      shell.appendChild(list);
+      shell.appendChild(card);
       approvalDock.appendChild(shell);
     }
 
@@ -881,10 +1335,16 @@ export function getChatScript(brandIconUri: string): string {
 
     function appendMessage(entry, msgIndex, pendingApprovalMap, pendingDiffSet) {
       const div = document.createElement("div");
-      const roleClass = entry.role === "user" ? "msg-user" : entry.role === "tool" ? "msg-tool" : "msg-assistant";
+      const roleClass = entry.role === "user"
+        ? "msg-user"
+        : entry.role === "tool"
+          ? "msg-tool msg-tool-compact"
+          : isToolPlaceholderAssistantMessage(entry)
+            ? "msg-assistant msg-activity-group"
+            : "msg-assistant";
       div.className = "msg " + roleClass;
 
-      if (entry.role === "tool") {
+      if (entry.role === "tool" && !div.classList.contains("msg-tool-compact")) {
         const label = document.createElement("div");
         label.className = "msg-label";
         label.textContent = "Tool";
@@ -894,18 +1354,39 @@ export function getChatScript(brandIconUri: string): string {
       const body = document.createElement("div");
       body.className = "msg-body";
 
-      if (entry.role === "assistant") {
+      if (entry.role === "assistant" && isToolPlaceholderAssistantMessage(entry)) {
+        const thoughtSummary = describeAssistantToolPlan(entry.toolCalls);
+        if (thoughtSummary) {
+          body.appendChild(
+            renderActivityRow({
+              verb: "Thought",
+              target: thoughtSummary,
+              meta: "Preparing the next step.",
+              details: "",
+              detailTitle: "",
+              collapsedByDefault: true,
+              status: "executed",
+              badgeText: "",
+              codeTarget: false,
+              variant: "thought",
+            }),
+          );
+        }
+      } else if (entry.role === "assistant") {
         body.innerHTML = formatThinkBlocks(entry.content);
       } else if (entry.role === "tool") {
         const toolSummary = summarizeToolContent(entry.content);
-        body.appendChild(
-          createCollapsibleToolDetails(
-            toolSummary.summary,
-            toolSummary.detailTitle,
-            toolSummary.details,
-            { collapsedByDefault: toolSummary.shouldCollapse },
-          ),
-        );
+        body.appendChild(renderActivityRow({
+          verb: "Tool",
+          target: toolSummary.summary || "Used tool output",
+          meta: "",
+          details: toolSummary.shouldCollapse ? toolSummary.details : "",
+          detailTitle: toolSummary.detailTitle,
+          collapsedByDefault: true,
+          status: "executed",
+          badgeText: "",
+          codeTarget: false,
+        }));
       } else {
         body.innerHTML = renderInlineMarkdown(entry.content);
       }
@@ -940,7 +1421,9 @@ export function getChatScript(brandIconUri: string): string {
         }
         body.appendChild(fileList);
       }
-      div.appendChild(body);
+      if (body.innerHTML.trim() || body.childNodes.length) {
+        div.appendChild(body);
+      }
 
       if (entry.role === "assistant" && messageStats.has(msgIndex)) {
         const stats = messageStats.get(msgIndex);
@@ -970,77 +1453,50 @@ export function getChatScript(brandIconUri: string): string {
     }
 
     function renderToolCall(tc, pendingApprovalMap, pendingDiffSet) {
-      const card = document.createElement("div");
-      card.className = "tool-call-card";
       const effectiveStatus = getEffectiveToolStatus(tc, pendingApprovalMap);
+      const activity = describeToolActivity(tc);
+      const toolSummary = tc.result ? summarizeToolContent(tc.result) : null;
 
-      const header = document.createElement("div");
-      header.className = "tool-call-header";
-
-      const typeEl = document.createElement("span");
-      typeEl.className = "tool-call-type";
-      typeEl.textContent = tc.type.replace(/_/g, " ");
-      header.appendChild(typeEl);
-
-      const pathEl = document.createElement("span");
-      pathEl.className = "tool-call-path";
-      const pathText = tc.type === "web_search" ? (tc.query || "")
-        : tc.type === "run_command" ? (tc.command || "")
-        : tc.type === "grep" ? (tc.pattern || "") + (tc.glob ? " (" + tc.glob + ")" : "")
-        : tc.type === "glob" ? (tc.glob || "")
-        : tc.type === "git_commit" ? (tc.commitMessage || "")
-        : tc.type === "git_status" || tc.type === "git_diff" ? ""
-        : (tc.filePath || "");
-      pathEl.textContent = pathText;
-      header.appendChild(pathEl);
-
-      const badge = document.createElement("span");
-      badge.className = "tool-status " + effectiveStatus;
-      badge.textContent = effectiveStatus === "pending" ? "awaiting approval" : effectiveStatus;
-      header.appendChild(badge);
-
-      card.appendChild(header);
-
-      if (
-        tc.type === "edit_file" &&
-        tc.search &&
-        (effectiveStatus === "pending" || pendingDiffSet.has(tc.id))
-      ) {
-        const diffContainer = document.createElement("div");
-        diffContainer.style.borderTop = "1px solid var(--border)";
-        const searchLines = tc.search.split("\\n");
-        for (const line of searchLines) {
-          const lineEl = document.createElement("div");
-          lineEl.className = "diff-line-removed";
-          lineEl.textContent = "- " + line;
-          diffContainer.appendChild(lineEl);
+      let meta = "";
+      let details = "";
+      let detailTitle = "Tool details";
+      if (toolSummary) {
+        meta = toolSummary.summary || "";
+        if (toolSummary.details && toolSummary.shouldCollapse) {
+          details = toolSummary.details;
+          detailTitle = toolSummary.detailTitle;
         }
-        if (tc.replace !== undefined) {
-          const replaceLines = (tc.replace || "").split("\\n");
-          for (const line of replaceLines) {
-            const lineEl = document.createElement("div");
-            lineEl.className = "diff-line-added";
-            lineEl.textContent = "+ " + line;
-            diffContainer.appendChild(lineEl);
-          }
-        }
-        card.appendChild(diffContainer);
+      } else if (effectiveStatus === "pending") {
+        meta = pendingDiffSet.has(tc.id) ? "Diff ready. Waiting for approval." : "Waiting for approval.";
+      } else if (effectiveStatus === "rejected") {
+        meta = "Skipped.";
+      } else if (effectiveStatus === "error") {
+        meta = "Tool failed.";
       }
 
-      if (tc.result) {
-        const resultEl = document.createElement("div");
-        resultEl.className = "tool-call-result";
-        const toolSummary = summarizeToolContent(tc.result);
-        const summaryText = toolSummary.summary || "Tool finished.";
-        resultEl.textContent =
-          summaryText +
-          (toolSummary.details && toolSummary.shouldCollapse
-            ? " Details below."
-            : "");
-        card.appendChild(resultEl);
+      if (!meta && activity.secondary) {
+        meta = activity.secondary;
       }
 
-      return card;
+      return renderActivityRow({
+        verb: activity.verb,
+        target: activity.target,
+        meta,
+        details,
+        detailTitle,
+        collapsedByDefault: true,
+        status: effectiveStatus,
+        badgeText:
+          effectiveStatus === "pending"
+            ? "awaiting approval"
+            : effectiveStatus === "error"
+              ? "error"
+              : effectiveStatus === "rejected"
+                ? "declined"
+                : "",
+        codeTarget: activity.codeTarget,
+        secondary: !meta ? activity.secondary : "",
+      });
     }
 
     function renderHarnessPane(payload) {
@@ -1470,13 +1926,299 @@ export function getChatScript(brandIconUri: string): string {
       });
     }
 
+    function normalizeStreamingPreviewText(text) {
+      return String(text || "")
+        .replace(/\\r/g, "")
+        // Some providers stream with single newlines inside words; join those
+        // for preview purposes so the live draft does not look typo-ridden.
+        .replace(/([\\p{L}\\p{N}])\\n(?=[\\p{L}\\p{N}])/gu, "$1")
+        .replace(/[ \\t]+/g, " ")
+        .replace(/\\n{3,}/g, "\\n\\n")
+        .trim();
+    }
+
+    function summarizeStreamingDraft(text) {
+      const normalized = normalizeStreamingPreviewText(text);
+      if (!normalized) return "";
+
+      const punctuationBoundaries = [
+        ". ",
+        "? ",
+        "! ",
+        ".\\n",
+        "?\\n",
+        "!\\n",
+        ": ",
+        ":\\n",
+      ];
+      let boundary = -1;
+      for (const marker of punctuationBoundaries) {
+        boundary = Math.max(boundary, normalized.lastIndexOf(marker));
+      }
+
+      if (boundary >= 0) {
+        const stable = normalized
+          .slice(0, boundary + 1)
+          .trim();
+        if (!stable) return "";
+        return stable.length > 140
+          ? stable.slice(0, 139).trimEnd() + "…"
+          : stable;
+      }
+
+      // Without a stable sentence/list boundary yet, keep the live preview
+      // conservative so we do not flash half-formed words.
+      return "";
+    }
+
+    function getStreamingBaseDetail(label, explicitDetail) {
+      const provided = String(explicitDetail || "").trim();
+      if (provided) return provided;
+      const normalizedLabel = String(label || "").trim().toLowerCase();
+      if (!normalizedLabel || normalizedLabel === DEFAULT_STREAM_LABEL.toLowerCase()) {
+        return DEFAULT_STREAM_DETAIL;
+      }
+      if (normalizedLabel.includes("continuing")) {
+        return "Picking up from the previous partial response.";
+      }
+      if (normalizedLabel.includes("thinking")) {
+        return DEFAULT_STREAM_DETAIL;
+      }
+      return "Working on the next step.";
+    }
+
+    function getActiveSpinnerVerb() {
+      return STREAM_SPINNER_VERBS[spinnerVerbIndex % STREAM_SPINNER_VERBS.length] || "Thinking";
+    }
+
+    function advanceSpinnerVerb() {
+      if (!STREAM_SPINNER_VERBS.length) return;
+      spinnerVerbIndex = (spinnerVerbIndex + 1) % STREAM_SPINNER_VERBS.length;
+    }
+
+    function stopSpinnerVerbRotation() {
+      if (spinnerVerbTimer) {
+        clearInterval(spinnerVerbTimer);
+        spinnerVerbTimer = null;
+      }
+    }
+
+    function startSpinnerVerbRotation() {
+      stopSpinnerVerbRotation();
+      if (!STREAM_SPINNER_VERBS.length) return;
+      spinnerVerbIndex = Math.floor(Math.random() * STREAM_SPINNER_VERBS.length);
+      spinnerVerbTimer = setInterval(() => {
+        advanceSpinnerVerb();
+        refreshStreamingView();
+      }, 1650);
+    }
+
+    function inferStreamingPhase(label) {
+      const normalized = String(label || "").trim().toLowerCase();
+      if (
+        normalized.includes("tool") ||
+        normalized.includes("search") ||
+        normalized.includes("read") ||
+        normalized.includes("fetch") ||
+        normalized.includes("run") ||
+        normalized.includes("inspect") ||
+        normalized.includes("resolve") ||
+        normalized.includes("apply") ||
+        normalized.includes("update") ||
+        normalized.includes("commit")
+      ) {
+        return "tool";
+      }
+      if (normalized.includes("draft") || normalized.includes("write") || normalized.includes("continu")) {
+        return "draft";
+      }
+      return "thinking";
+    }
+
+    function describeStreamingToolHint(toolName, toolTarget, detail) {
+      const target = String(toolTarget || "").trim();
+      const extra = String(detail || "").trim();
+      switch (toolName) {
+        case "read_file":
+          return { label: "Reading file...", detail: target || extra || "Inspecting a file." };
+        case "write_file":
+        case "edit_file":
+          return { label: "Preparing edit...", detail: target || extra || "Updating a file." };
+        case "run_command":
+          return { label: "Running command...", detail: target || extra || "Executing a shell command." };
+        case "web_search":
+          return { label: "Searching the web...", detail: target || "Looking up information." };
+        case "web_fetch":
+          return { label: "Fetching page...", detail: target || "Loading a page." };
+        case "grep":
+          return { label: "Searching code...", detail: [target, extra].filter(Boolean).join(" · ") || "Searching the repo." };
+        case "glob":
+        case "list_files":
+          return { label: "Finding files...", detail: [target, extra].filter(Boolean).join(" · ") || "Scanning the workspace." };
+        case "list_tools":
+          return { label: "Inspecting tools...", detail: "Checking which actions are available." };
+        case "list_skills":
+          return { label: "Inspecting skills...", detail: "Checking which skills are available." };
+        case "run_skill":
+          return { label: "Activating skill...", detail: target || "Preparing a skill-guided response." };
+        case "diagnostics":
+          return { label: "Inspecting diagnostics...", detail: target || extra || "Checking current issues." };
+        case "go_to_definition":
+        case "open_definition":
+          return { label: "Resolving definition...", detail: target || extra || "Tracing implementation." };
+        case "find_references":
+          return { label: "Finding references...", detail: target || extra || "Looking for usages." };
+        case "document_symbols":
+        case "workspace_symbols":
+          return { label: "Inspecting symbols...", detail: target || extra || "Scanning symbols." };
+        case "hover_symbol":
+          return { label: "Inspecting symbol...", detail: target || extra || "Loading symbol details." };
+        case "code_actions":
+          return { label: "Checking code actions...", detail: target || extra || "Looking for editor fixes." };
+        case "apply_code_action":
+          return { label: "Applying code action...", detail: target || extra || "Applying an editor fix." };
+        case "git_status":
+          return { label: "Checking git status...", detail: "Inspecting repository changes." };
+        case "git_diff":
+          return { label: "Getting diff...", detail: "Reviewing changed lines." };
+        case "git_commit":
+          return { label: "Committing...", detail: target || "Creating a commit." };
+        case "todo_write":
+          return { label: "Updating tasks...", detail: target || "Refreshing the task list." };
+        case "memory_read":
+          return { label: "Reading memory...", detail: target || "Checking saved project memory." };
+        case "memory_write":
+          return { label: "Writing memory...", detail: target || "Saving project memory." };
+        case "memory_delete":
+          return { label: "Deleting memory...", detail: target || "Removing saved memory." };
+        default:
+          return { label: "Using tool...", detail: [target, extra].filter(Boolean).join(" · ") || "" };
+      }
+    }
+
+    function describeTextToolCall(text) {
+      const trimmed = String(text || "").trim();
+      if (!trimmed || trimmed.includes("\\n")) return null;
+
+      const patterns = [
+        { re: /^@list_tools(?::\s*(.+))?$/i, toolName: "list_tools", targetGroup: 1 },
+        { re: /^@list_skills(?::\s*(.+))?$/i, toolName: "list_skills", targetGroup: 1 },
+        { re: /^@run_skill:\s*(.+)$/i, toolName: "run_skill", targetGroup: 1 },
+        { re: /^@diagnostics(?::\s*(.+))?$/i, toolName: "diagnostics", targetGroup: 1 },
+        { re: /^@go_to_definition:\s*(.+)$/i, toolName: "go_to_definition", targetGroup: 1 },
+        { re: /^@find_references:\s*(.+)$/i, toolName: "find_references", targetGroup: 1 },
+        { re: /^@document_symbols:\s*(.+)$/i, toolName: "document_symbols", targetGroup: 1 },
+        { re: /^@read_file:\s*(.+)$/i, toolName: "read_file", targetGroup: 1 },
+        { re: /^@web_search:\s*(.+)$/i, toolName: "web_search", targetGroup: 1 },
+        { re: /^@list_files:\s*(.+)$/i, toolName: "list_files", targetGroup: 1 },
+        { re: /^@run_command:\s*(.+)$/i, toolName: "run_command", targetGroup: 1 },
+        { re: /^@grep:\s*(.+)$/i, toolName: "grep", targetGroup: 1 },
+        { re: /^@glob:\s*(.+)$/i, toolName: "glob", targetGroup: 1 },
+        { re: /^@git_status$/i, toolName: "git_status", targetGroup: 0 },
+        { re: /^@git_diff$/i, toolName: "git_diff", targetGroup: 0 },
+        { re: /^@git_commit:\s*(.+)$/i, toolName: "git_commit", targetGroup: 1 },
+      ];
+
+      for (const pattern of patterns) {
+        const match = trimmed.match(pattern.re);
+        if (!match) continue;
+        const target = pattern.targetGroup ? (match[pattern.targetGroup] || "").trim() : "";
+        return describeStreamingToolHint(pattern.toolName, target, "");
+      }
+
+      return null;
+    }
+
+    function renderStreamingState(options) {
+      const label = String(options?.label || DEFAULT_STREAM_LABEL);
+      const detail = String(options?.detail || "").trim();
+      const draft = String(options?.draft || "").trim();
+      const phase = inferStreamingPhase(label);
+      const spinnerVerb = String(options?.spinnerVerb || "").trim();
+      const elapsed = streamStartTime
+        ? ((Date.now() - streamStartTime) / 1000).toFixed(1) + "s"
+        : "";
+
+      let html = '<div class="stream-panel">';
+      html += '<div class="stream-status-row">';
+      html += '<div class="stream-status">';
+      html += '<span class="stream-phase-dot ' + escapeHtml(phase) + '"></span>';
+      html += '<span class="stream-status-label">' + escapeHtml(label) + "</span>";
+      html += "</div>";
+      if (elapsed) {
+        html += '<div class="stream-elapsed">' + escapeHtml(elapsed) + "</div>";
+      }
+      html += "</div>";
+      if (detail) {
+        html += '<div class="stream-detail">' + escapeHtml(detail) + "</div>";
+      }
+      if (spinnerVerb) {
+        html += '<div class="stream-verb-row"><span class="stream-verb-chip">' + escapeHtml(spinnerVerb) + "</span></div>";
+      }
+      if (draft) {
+        html += '<div class="stream-preview">' + escapeHtml(draft) + "</div>";
+      }
+      html += "</div>";
+      return html;
+    }
+
+    function refreshStreamingView() {
+      if (!streamingEl) return;
+
+      if (streamingToolMode) {
+        const currentTool = streamingToolHint
+          ? describeStreamingToolHint(
+              streamingToolHint.toolName,
+              streamingToolHint.toolTarget,
+              streamingToolHint.detail,
+            )
+          : { label: "Calling tools...", detail: "Waiting for the tool payload." };
+        streamingEl.innerHTML = renderStreamingState({
+          ...currentTool,
+          spinnerVerb: getActiveSpinnerVerb(),
+        });
+        scrollToBottom();
+        return;
+      }
+
+      const trimmed = streamingText.trim();
+      const textToolStatus = describeTextToolCall(trimmed);
+      const draftPreview =
+        textToolStatus || !trimmed
+          ? ""
+          : summarizeStreamingDraft(trimmed);
+
+      streamingEl.innerHTML = textToolStatus
+        ? renderStreamingState({
+            ...textToolStatus,
+            spinnerVerb: getActiveSpinnerVerb(),
+          })
+        : draftPreview
+          ? renderStreamingState({
+              label: "Drafting response...",
+              detail: "The model has started writing.",
+              draft: draftPreview,
+              spinnerVerb: getActiveSpinnerVerb(),
+            })
+          : renderStreamingState({
+              label: streamingBaseLabel || DEFAULT_STREAM_LABEL,
+              detail: streamingBaseDetail || DEFAULT_STREAM_DETAIL,
+              spinnerVerb: getActiveSpinnerVerb(),
+            });
+      scrollToBottom();
+    }
+
     /* ── Streaming ── */
-    function startStreaming() {
+    function startStreaming(options) {
       isStreaming = true;
       streamingText = "";
       streamingToolMode = false;
+      streamingToolHint = null;
+      streamingBaseLabel = String(options?.label || DEFAULT_STREAM_LABEL).trim() || DEFAULT_STREAM_LABEL;
+      streamingBaseDetail = getStreamingBaseDetail(streamingBaseLabel, options?.detail);
       streamStartTime = Date.now();
       streamChunkCount = 0;
+      startSpinnerVerbRotation();
 
       const div = document.createElement("div");
       div.className = "msg msg-assistant";
@@ -1485,78 +2227,32 @@ export function getChatScript(brandIconUri: string): string {
       const body = document.createElement("div");
       body.className = "msg-body";
       body.id = "streaming-body";
-      body.innerHTML = '<div class="stream-status">Thinking...</div><span class="streaming-cursor"></span>';
       div.appendChild(body);
 
       messagesEl.appendChild(div);
       streamingEl = body;
+      refreshStreamingView();
       scrollToBottom();
     }
 
     function appendStreamChunk(text) {
       streamingText += text;
       streamChunkCount++;
-      if (streamingEl) {
-        if (streamingToolMode) {
-          streamingEl.innerHTML =
-            '<div class="stream-status">Calling tools...</div><span class="streaming-cursor"></span>';
-          scrollToBottom();
-          return;
-        }
-        const trimmed = streamingText.trim();
-        let statusLabel = "";
-        const fallbackLabel = trimmed
-          ? ""
-          : '<div class="stream-status">Thinking...</div>';
-        const singleLine = !trimmed.includes("\\n");
-        if (singleLine && /^@list_tools(?::\\s*.+)?$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Inspecting tools...</div>';
-        } else if (singleLine && /^@list_skills(?::\\s*.+)?$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Inspecting skills...</div>';
-        } else if (singleLine && /^@run_skill:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Activating skill...</div>';
-        } else if (singleLine && /^@diagnostics(?::\\s*.+)?$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Inspecting diagnostics...</div>';
-        } else if (singleLine && /^@go_to_definition:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Resolving definition...</div>';
-        } else if (singleLine && /^@find_references:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Finding references...</div>';
-        } else if (singleLine && /^@document_symbols:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Inspecting document symbols...</div>';
-        } else if (singleLine && /^@read_file:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Reading file...</div>';
-        } else if (singleLine && /^@web_search:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Searching the web...</div>';
-        } else if (singleLine && /^@list_files:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Listing files...</div>';
-        } else if (singleLine && /^@run_command:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Running command...</div>';
-        } else if (singleLine && /^@grep:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Searching code...</div>';
-        } else if (singleLine && /^@glob:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Finding files...</div>';
-        } else if (singleLine && /^@git_status/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Checking git status...</div>';
-        } else if (singleLine && /^@git_diff/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Getting diff...</div>';
-        } else if (singleLine && /^@git_commit:\\s*.+$/.test(trimmed)) {
-          statusLabel = '<div class="stream-status">Committing...</div>';
-        }
-        streamingEl.innerHTML =
-          (statusLabel || fallbackLabel || formatThinkBlocks(streamingText)) +
-          '<span class="streaming-cursor"></span>';
-        scrollToBottom();
-      }
+      refreshStreamingView();
     }
 
     function endStreaming() {
       isStreaming = false;
+      stopSpinnerVerbRotation();
       if (streamingEl) {
         streamingEl.innerHTML = formatThinkBlocks(streamingText);
       }
       streamingEl = null;
       streamingText = "";
       streamingToolMode = false;
+      streamingToolHint = null;
+      streamingBaseLabel = "";
+      streamingBaseDetail = "";
     }
 
     /* ── Session menu ── */
@@ -1973,18 +2669,23 @@ export function getChatScript(brandIconUri: string): string {
             handleState(msg);
             break;
           case "streamStart":
-            startStreaming();
+            startStreaming({
+              label: msg.label || DEFAULT_STREAM_LABEL,
+              detail: msg.detail || "",
+            });
             break;
           case "streamChunk":
             appendStreamChunk(msg.text);
             break;
           case "streamToolCallDetected":
             streamingToolMode = true;
+            streamingToolHint = {
+              toolName: msg.toolName || "",
+              toolTarget: msg.toolTarget || "",
+              detail: msg.detail || "",
+            };
             streamingText = "";
-            if (streamingEl) {
-              streamingEl.innerHTML =
-                '<div class="stream-status">Calling tools...</div><span class="streaming-cursor"></span>';
-            }
+            refreshStreamingView();
             break;
           case "streamEnd": {
             const elapsedMs = streamStartTime ? Date.now() - streamStartTime : 0;

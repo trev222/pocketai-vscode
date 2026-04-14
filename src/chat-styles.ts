@@ -363,6 +363,14 @@ export function getChatStyles(): string {
       font-size: 12px;
     }
 
+    .msg-activity-group,
+    .msg-tool-compact {
+      background: transparent;
+      border: 0;
+      padding: 2px 0;
+      margin-bottom: 2px;
+    }
+
     .msg-label {
       font-size: 11px;
       font-weight: 600;
@@ -492,10 +500,27 @@ export function getChatStyles(): string {
 
     /* ── Tool Call UI ── */
     .tool-call-card {
-      margin: 8px 0;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      overflow: hidden;
+      margin: 6px 0;
+      border: 0;
+      border-radius: 0;
+      overflow: visible;
+      background: transparent;
+    }
+
+    .tool-call-card.activity-variant-thought .tool-call-dot {
+      background: rgba(255,255,255,0.28);
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.025);
+    }
+
+    .tool-call-card.activity-variant-thought .tool-call-verb {
+      color: var(--fg-muted);
+      font-weight: 600;
+    }
+
+    .tool-call-card.activity-variant-thought .tool-call-path {
+      font-family: var(--font-sans);
+      font-size: 13px;
+      color: var(--fg);
     }
 
     .tool-call-header {
@@ -506,6 +531,14 @@ export function getChatStyles(): string {
       background: rgba(255,255,255,0.03);
       font-size: 12px;
       gap: 8px;
+    }
+
+    .tool-call-header-inline {
+      align-items: flex-start;
+      justify-content: flex-start;
+      gap: 0;
+      padding: 0;
+      background: transparent;
     }
 
     .tool-call-type {
@@ -522,6 +555,65 @@ export function getChatStyles(): string {
       overflow: hidden;
       text-overflow: ellipsis;
       flex: 1;
+    }
+
+    .tool-call-main {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .tool-call-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      line-height: 1.3;
+    }
+
+    .tool-call-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      margin-top: 1px;
+      background: rgba(255,255,255,0.22);
+    }
+
+    .tool-call-dot.pending { background: rgba(215,186,125,0.9); }
+    .tool-call-dot.executed { background: rgba(78,201,176,0.9); }
+    .tool-call-dot.error { background: rgba(241,76,76,0.9); }
+    .tool-call-dot.rejected { background: rgba(241,76,76,0.7); }
+    .tool-call-dot.approved { background: rgba(78,201,176,0.75); }
+
+    .tool-call-verb {
+      color: var(--fg);
+      font-weight: 650;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+
+    .tool-call-inline-code {
+      font-family: var(--font-mono);
+      color: var(--fg-muted);
+      font-size: 12px;
+    }
+
+    .tool-call-meta {
+      color: var(--fg-muted);
+      font-size: 12px;
+      line-height: 1.45;
+      padding-left: 19px;
+    }
+
+    .tool-call-secondary {
+      color: rgba(255,255,255,0.42);
+      font-size: 11px;
+      line-height: 1.35;
+      padding-left: 19px;
+      font-family: var(--font-mono);
     }
 
     .tool-call-actions { display: flex; gap: 4px; }
@@ -576,7 +668,7 @@ export function getChatStyles(): string {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 3px 9px;
+      padding: 2px 8px;
       border: 1px solid var(--border);
       border-radius: 999px;
       background: rgba(255,255,255,0.03);
@@ -597,6 +689,15 @@ export function getChatStyles(): string {
       border: 1px solid rgba(255,255,255,0.05);
       border-radius: 8px;
       background: rgba(0,0,0,0.12);
+    }
+
+    .activity-details {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+      padding-left: 19px;
+      margin-top: 2px;
     }
 
     .msg-tool .tool-details-content {
@@ -642,19 +743,6 @@ export function getChatStyles(): string {
     .tool-status.rejected { background: rgba(241,76,76,0.1); color: var(--error); }
     .tool-status.error { background: rgba(241,76,76,0.1); color: var(--error); }
 
-    /* ── Streaming indicator ── */
-    .streaming-cursor {
-      display: inline-block;
-      width: 7px;
-      height: 14px;
-      background: var(--accent);
-      margin-left: 2px;
-      animation: blink 1s step-end infinite;
-      vertical-align: middle;
-    }
-
-    @keyframes blink { 50% { opacity: 0; } }
-
     .thinking-indicator {
       display: flex;
       align-items: center;
@@ -694,20 +782,63 @@ export function getChatStyles(): string {
 
     .approval-dock {
       display: none;
-      padding: 8px 12px 0;
-      flex-shrink: 0;
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 96px;
+      padding: 0 20px;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 60;
     }
 
     .approval-dock.active {
-      display: block;
+      display: flex;
     }
 
     .approval-dock-shell {
-      border: 1px solid rgba(56,189,248,0.24);
-      border-radius: 12px;
-      background: linear-gradient(180deg, rgba(56,189,248,0.08), rgba(56,189,248,0.03));
-      padding: 10px 12px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.16);
+      position: relative;
+      width: min(100%, 640px);
+      pointer-events: auto;
+    }
+
+    .approval-dock-stack {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .approval-dock-stack-layer {
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      height: 100%;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.05);
+      background: rgba(255,255,255,0.03);
+      box-shadow: 0 18px 40px rgba(0,0,0,0.18);
+    }
+
+    .approval-dock-stack-layer.layer-1 {
+      top: 10px;
+      opacity: 0.55;
+    }
+
+    .approval-dock-stack-layer.layer-2 {
+      top: 20px;
+      left: 32px;
+      right: 32px;
+      opacity: 0.28;
+    }
+
+    .approval-dock-card {
+      position: relative;
+      border: 1px solid rgba(215,186,125,0.28);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255,248,220,0.08), rgba(255,248,220,0.03));
+      padding: 14px 16px;
+      box-shadow: 0 18px 46px rgba(0,0,0,0.28);
+      backdrop-filter: blur(8px);
     }
 
     .approval-dock-header {
@@ -737,25 +868,11 @@ export function getChatStyles(): string {
       color: var(--fg);
     }
 
-    .approval-dock-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .approval-dock-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px 0 0;
-      border-top: 1px solid rgba(255,255,255,0.06);
-    }
-
-    .approval-dock-item:first-child {
-      padding-top: 0;
-      border-top: none;
+    .approval-dock-title {
+      font-size: 19px;
+      line-height: 1.25;
+      font-weight: 650;
+      color: var(--fg);
     }
 
     .approval-dock-info {
@@ -796,10 +913,25 @@ export function getChatStyles(): string {
 
     .approval-dock-path {
       min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
       font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--fg-muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(0,0,0,0.14);
+    }
+
+    .approval-dock-subject {
+      font-size: 13px;
+      color: var(--fg);
+    }
+
+    .approval-dock-detail {
+      margin-top: 8px;
       font-size: 12px;
       color: var(--fg-muted);
     }
@@ -809,6 +941,19 @@ export function getChatStyles(): string {
       gap: 6px;
       flex-wrap: wrap;
       flex-shrink: 0;
+      margin-top: 12px;
+    }
+
+    .approval-dock-primary-actions .tool-btn {
+      min-width: 90px;
+      padding-top: 6px;
+      padding-bottom: 6px;
+      font-size: 12px;
+      border-radius: 8px;
+    }
+
+    .approval-dock-secondary-actions {
+      margin-top: 8px;
     }
 
     .harness-card {
@@ -946,13 +1091,26 @@ export function getChatStyles(): string {
     }
 
     @media (max-width: 760px) {
-      .approval-dock-item {
-        flex-direction: column;
-        align-items: stretch;
+      .approval-dock {
+        bottom: 88px;
+        padding: 0 12px;
+      }
+
+      .approval-dock-card {
+        padding: 12px;
+      }
+
+      .approval-dock-title {
+        font-size: 16px;
       }
 
       .approval-dock-actions {
         width: 100%;
+      }
+
+      .approval-dock-primary-actions .tool-btn,
+      .approval-dock-secondary-actions .tool-btn {
+        flex: 1 1 auto;
       }
     }
 
@@ -1640,14 +1798,126 @@ export function getChatStyles(): string {
     }
 
     /* ── Streaming status label ── */
+    .stream-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.05);
+      max-width: 100%;
+    }
+
+    .stream-status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
     .stream-status {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
+      gap: 8px;
+      min-width: 0;
+      color: var(--fg);
+    }
+
+    .stream-status-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--fg);
+    }
+
+    .stream-phase-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--fg-muted);
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.03);
+    }
+
+    .stream-phase-dot.thinking {
+      background: var(--fg-muted);
+    }
+
+    .stream-phase-dot.tool {
+      background: var(--accent);
+    }
+
+    .stream-phase-dot.draft {
+      background: var(--success);
+    }
+
+    .stream-elapsed {
+      font-size: 10px;
+      color: var(--fg-muted);
+      font-family: var(--font-mono);
+      flex-shrink: 0;
+    }
+
+    .stream-detail {
       font-size: 12px;
       color: var(--fg-muted);
-      font-style: italic;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .stream-verb-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 22px;
+    }
+
+    .stream-verb-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+      animation: spinnerVerbPulse 1.65s ease-in-out infinite;
+      transform-origin: center;
+    }
+
+    @keyframes spinnerVerbPulse {
+      0% {
+        opacity: 0.45;
+        transform: translateY(2px) scale(0.985);
+      }
+      18% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+      82% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+      100% {
+        opacity: 0.5;
+        transform: translateY(-1px) scale(0.99);
+      }
+    }
+
+    .stream-preview {
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--fg);
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.05);
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     /* ── Attachment support ── */

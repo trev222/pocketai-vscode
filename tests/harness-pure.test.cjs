@@ -144,6 +144,19 @@ const {
   buildPocketAiRemoteEndpoint,
 } = require("../dist/pocketai-remote-devices.js");
 const {
+  getOpenCodeGoChatModels,
+  getOpenCodeGoHealthProbeInit,
+  isOpenCodeGoEndpoint,
+  normalizeEndpointInputUrl,
+  toOpenCodeGoRequestModel,
+} = require("../dist/opencode-go.js");
+const {
+  XAI_BASE_URL,
+  getXAIProviderName,
+  isXAIEndpoint,
+  normalizeXAIBaseUrl,
+} = require("../dist/xai.js");
+const {
   getChatScript,
 } = require("../dist/chat-script.js");
 
@@ -775,7 +788,15 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     "codex-bridge",
   );
   assert.equal(
+    getEndpointProviderKind("http://127.0.0.1:39460"),
+    "claude-bridge",
+  );
+  assert.equal(
     getEndpointProviderKind("https://example.com/v1"),
+    "openai-compatible",
+  );
+  assert.equal(
+    getEndpointProviderKind("https://opencode.ai/zen/go"),
     "openai-compatible",
   );
 
@@ -786,6 +807,17 @@ test("provider capabilities and chat controls honor provider kind and codex reas
       supportsStructuredTools: false,
       supportsReasoningEffort: true,
       requiresBridgeBootstrap: true,
+      usesReportedUsageForContext: false,
+    },
+  );
+  assert.deepEqual(
+    getEndpointCapabilities("http://127.0.0.1:39460"),
+    {
+      kind: "claude-bridge",
+      supportsStructuredTools: false,
+      supportsReasoningEffort: false,
+      requiresBridgeBootstrap: true,
+      usesReportedUsageForContext: false,
     },
   );
   assert.deepEqual(
@@ -797,6 +829,17 @@ test("provider capabilities and chat controls honor provider kind and codex reas
       supportsStructuredTools: false,
       supportsReasoningEffort: false,
       requiresBridgeBootstrap: false,
+      usesReportedUsageForContext: true,
+    },
+  );
+  assert.deepEqual(
+    getEndpointCapabilities("https://opencode.ai/zen/go"),
+    {
+      kind: "openai-compatible",
+      supportsStructuredTools: true,
+      supportsReasoningEffort: false,
+      requiresBridgeBootstrap: false,
+      usesReportedUsageForContext: false,
     },
   );
 
@@ -1609,6 +1652,24 @@ test("prompt workflow helper composes slash skill, local skill intent, auto-rout
   });
   assert.equal(clockPromptResult.kind, "ready");
   assert.match(clockPromptResult.transientSystemPrompt || "", /@run_command:\s+date /);
+
+  const bridgeRepoPromptResult = preparePromptForSend({
+    session: createSession({ selectedModel: "", activeSkills: [] }),
+    prompt: "in this repo can you tell me where claude has the cool action words that show when loading?",
+    availableSkills: skills,
+    preferredModel: "gpt-5.4",
+    fallbackTitleNumber: 6,
+    providerKind: "codex-bridge",
+  });
+  assert.equal(bridgeRepoPromptResult.kind, "ready");
+  assert.match(
+    bridgeRepoPromptResult.transientSystemPrompt || "",
+    /Bridge Tool Discipline/,
+  );
+  assert.match(
+    bridgeRepoPromptResult.transientSystemPrompt || "",
+    /MUST emit an appropriate PocketAI tool call/i,
+  );
 });
 
 test("prompt workflow helper only injects local clock verification for narrow local time/date prompts", () => {
@@ -1626,6 +1687,20 @@ test("prompt workflow helper only injects local clock verification for narrow lo
   );
   assert.equal(
     buildTransientSystemPromptForPrompt("convert 4pm tokyo to new york time"),
+    undefined,
+  );
+  assert.match(
+    buildTransientSystemPromptForPrompt(
+      "look in this repo and tell me where the loading spinner words are",
+      "claude-bridge",
+    ) || "",
+    /Bridge Tool Discipline/,
+  );
+  assert.equal(
+    buildTransientSystemPromptForPrompt(
+      "look in this repo and tell me where the loading spinner words are",
+      "local-pocketai",
+    ),
     undefined,
   );
 });
@@ -1962,6 +2037,71 @@ test("remote PocketAI device endpoints are built as managed in-memory endpoints"
     }),
     null,
   );
+});
+
+test("OpenCode Go helpers normalize endpoint URLs and expose chat-compatible models", () => {
+  assert.equal(
+    normalizeEndpointInputUrl("https://opencode.ai/zen/go/v1/chat/completions"),
+    "https://opencode.ai/zen/go",
+  );
+  assert.equal(
+    normalizeEndpointInputUrl("https://opencode.ai/zen/go/v1"),
+    "https://opencode.ai/zen/go",
+  );
+  assert.equal(isOpenCodeGoEndpoint("https://opencode.ai/zen/go"), true);
+  assert.equal(isOpenCodeGoEndpoint("https://example.com/v1"), false);
+  assert.deepEqual(getOpenCodeGoChatModels(), [
+    "opencode-go/glm-5",
+    "opencode-go/glm-5.1",
+    "opencode-go/kimi-k2.5",
+    "opencode-go/mimo-v2-pro",
+    "opencode-go/mimo-v2-omni",
+  ]);
+  assert.equal(
+    toOpenCodeGoRequestModel(
+      "opencode-go/glm-5.1",
+      "https://opencode.ai/zen/go",
+    ),
+    "glm-5.1",
+  );
+  assert.equal(
+    toOpenCodeGoRequestModel(
+      "opencode-go/glm-5.1",
+      "http://127.0.0.1:39457",
+    ),
+    "opencode-go/glm-5.1",
+  );
+  assert.deepEqual(getOpenCodeGoHealthProbeInit("test-key"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer test-key",
+    },
+    body: "{}",
+  });
+});
+
+test("xAI helpers normalize Grok endpoints and provide a friendly default name", () => {
+  assert.equal(XAI_BASE_URL, "https://api.x.ai");
+  assert.equal(isXAIEndpoint("https://api.x.ai/v1"), true);
+  assert.equal(isXAIEndpoint("https://us-east-1.api.x.ai/v1/chat/completions"), true);
+  assert.equal(isXAIEndpoint("https://example.com/v1"), false);
+  assert.equal(normalizeXAIBaseUrl("https://api.x.ai/v1"), "https://api.x.ai");
+  assert.equal(
+    normalizeXAIBaseUrl("https://api.x.ai/v1/chat/completions"),
+    "https://api.x.ai",
+  );
+  assert.equal(
+    normalizeXAIBaseUrl("https://us-east-1.api.x.ai/v1/models"),
+    "https://us-east-1.api.x.ai",
+  );
+  assert.equal(
+    normalizeEndpointInputUrl("https://api.x.ai/v1/chat/completions"),
+    "https://api.x.ai",
+  );
+  assert.equal(getXAIProviderName(""), "Grok (xAI)");
+  assert.equal(getXAIProviderName("https://api.x.ai/v1"), "Grok (xAI)");
+  assert.equal(getXAIProviderName("My Grok"), "My Grok");
 });
 
 test("chat webview script emits valid JavaScript", () => {

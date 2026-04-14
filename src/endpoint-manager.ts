@@ -14,6 +14,15 @@ import {
 } from "./provider-capabilities";
 import { LOCAL_POCKETAI_URL } from "./provider-constants";
 import {
+  getOpenCodeGoChatModels,
+  getOpenCodeGoHealthProbeInit,
+  getOpenCodeGoHealthProbeUrl,
+  getOpenCodeGoStatusLabel,
+  isLikelyReachableOpenCodeStatus,
+  isOpenCodeGoEndpoint,
+  normalizeEndpointInputUrl,
+} from "./opencode-go";
+import {
   applyRefreshedModelsToSessions,
   resolveActiveEndpointUrl,
 } from "./endpoint-workflows";
@@ -73,14 +82,14 @@ export class EndpointManager {
     const endpoints = this.getEndpoints();
     const normalizedActive = normalizeBaseUrl(this.activeEndpointUrl);
     const match = endpoints.find(
-      (ep) => normalizeBaseUrl(ep.url) === normalizedActive,
+      (ep) => normalizeEndpointInputUrl(ep.url) === normalizedActive,
     );
     const config =
       match ??
       endpoints[0] ?? { name: "Local PocketAI", url: LOCAL_POCKETAI_URL };
 
     return {
-      url: normalizeBaseUrl(config.url),
+      url: normalizeEndpointInputUrl(config.url),
       config,
     };
   }
@@ -106,13 +115,13 @@ export class EndpointManager {
     const configured = this.getConfiguredEndpoints();
     const merged = configured.slice();
     const configuredUrls = new Set(
-      configured.map((endpoint) => normalizeBaseUrl(endpoint.url)),
+      configured.map((endpoint) => normalizeEndpointInputUrl(endpoint.url)),
     );
 
     for (const endpoint of this.managedEndpointMap.values()) {
-      const url = normalizeBaseUrl(endpoint.url);
+      const url = normalizeEndpointInputUrl(endpoint.url);
       if (!configuredUrls.has(url)) {
-        merged.push(endpoint);
+        merged.push({ ...endpoint, url });
       }
     }
 
@@ -122,7 +131,10 @@ export class EndpointManager {
   setManagedEndpoints(endpoints: EndpointConfig[]): boolean {
     const next = new Map<string, EndpointConfig>();
     for (const endpoint of endpoints) {
-      next.set(normalizeBaseUrl(endpoint.url), endpoint);
+      next.set(normalizeEndpointInputUrl(endpoint.url), {
+        ...endpoint,
+        url: normalizeEndpointInputUrl(endpoint.url),
+      });
     }
 
     const serialize = (map: Map<string, EndpointConfig>) =>
@@ -166,11 +178,11 @@ export class EndpointManager {
 
   initEndpoints() {
     const endpoints = this.getEndpoints();
-    const storedActiveEndpointUrl = normalizeBaseUrl(
+      const storedActiveEndpointUrl = normalizeBaseUrl(
       this.context.workspaceState.get<string>(ACTIVE_ENDPOINT_STORAGE_KEY) ?? "",
     );
     for (const ep of endpoints) {
-      const url = normalizeBaseUrl(ep.url);
+      const url = normalizeEndpointInputUrl(ep.url);
       if (!this.endpointHealthMap.has(url)) {
         this.endpointHealthMap.set(url, {
           name: ep.name,
@@ -213,7 +225,7 @@ export class EndpointManager {
       const endpoints = this.getEndpoints();
       const currentUrls = new Set<string>();
       for (const ep of endpoints) {
-        const url = normalizeBaseUrl(ep.url);
+        const url = normalizeEndpointInputUrl(ep.url);
         currentUrls.add(url);
         if (!this.endpointHealthMap.has(url)) {
           this.endpointHealthMap.set(url, {
@@ -230,12 +242,15 @@ export class EndpointManager {
 
       let changed = false;
       for (const health of this.endpointHealthMap.values()) {
-        const ep = endpoints.find((e) => normalizeBaseUrl(e.url) === health.url);
+        const ep = endpoints.find(
+          (e) => normalizeEndpointInputUrl(e.url) === health.url,
+        );
         const apiKey = ep?.apiKey || "local-pocketai";
         const prevHealthy = health.healthy;
         const start = Date.now();
+        const normalizedHealthUrl = normalizeEndpointInputUrl(health.url);
         try {
-          const resp = await fetch(`${health.url}/v1/models`, {
+          const resp = await fetch(`${normalizedHealthUrl}/v1/models`, {
             headers: { Authorization: `Bearer ${apiKey}` },
             signal: AbortSignal.timeout(5000),
           });
@@ -243,8 +258,28 @@ export class EndpointManager {
             health.healthy = true;
             health.latencyMs = Date.now() - start;
             health.error = undefined;
+          } else if (isOpenCodeGoEndpoint(normalizedHealthUrl)) {
+            const probeResp = await fetch(
+              getOpenCodeGoHealthProbeUrl(normalizedHealthUrl),
+              {
+                ...getOpenCodeGoHealthProbeInit(apiKey),
+                signal: AbortSignal.timeout(5000),
+              },
+            );
+            if (isLikelyReachableOpenCodeStatus(probeResp.status)) {
+              health.healthy = probeResp.status !== 401 && probeResp.status !== 403;
+              health.latencyMs = Date.now() - start;
+              health.error =
+                probeResp.status === 401 || probeResp.status === 403
+                  ? "Authentication required — add a valid API key"
+                  : undefined;
+            } else {
+              health.healthy = false;
+              health.latencyMs = Date.now() - start;
+              health.error = `HTTP ${probeResp.status}`;
+            }
           } else {
-            const statusResp = await fetch(`${health.url}/status`, {
+            const statusResp = await fetch(`${normalizedHealthUrl}/status`, {
               headers: { Authorization: `Bearer ${apiKey}` },
               signal: AbortSignal.timeout(5000),
             });
@@ -294,35 +329,44 @@ export class EndpointManager {
   ) {
     try {
       this.statusSummary = "checking...";
-      const activeApiKey = this.getActiveEndpointConfig().apiKey || "local-pocketai";
       let foundModels: string[] = [];
       let respondedSuccessfully = false;
       let lastError: unknown;
+      const normalizedBaseUrl = normalizeEndpointInputUrl(this.baseUrl);
+      const isOpenCodeGo = isOpenCodeGoEndpoint(normalizedBaseUrl);
+      const configuredApiKey = this.getActiveEndpointConfig().apiKey?.trim() || "";
+      const activeApiKey = configuredApiKey || "local-pocketai";
 
-      try {
-        const response = await fetch(`${this.baseUrl}/v1/models`, {
-          headers: { Authorization: `Bearer ${activeApiKey}` },
-        });
-        if (response.ok) {
-          respondedSuccessfully = true;
-          const payload = (await response.json()) as ModelListResponse;
-          foundModels = Array.from(
-            new Set(
-              (payload.data ?? [])
-                .map((m) => m.id?.trim() ?? "")
-                .filter(Boolean),
-            ),
-          );
-        } else {
-          this.statusSummary = `HTTP ${response.status}`;
+      if (isOpenCodeGo) {
+        respondedSuccessfully = true;
+        foundModels = getOpenCodeGoChatModels();
+        this.statusSummary = getOpenCodeGoStatusLabel(!!configuredApiKey);
+      } else {
+        try {
+          const response = await fetch(`${normalizedBaseUrl}/v1/models`, {
+            headers: { Authorization: `Bearer ${activeApiKey}` },
+          });
+          if (response.ok) {
+            respondedSuccessfully = true;
+            const payload = (await response.json()) as ModelListResponse;
+            foundModels = Array.from(
+              new Set(
+                (payload.data ?? [])
+                  .map((m) => m.id?.trim() ?? "")
+                  .filter(Boolean),
+              ),
+            );
+          } else {
+            this.statusSummary = `HTTP ${response.status}`;
+          }
+        } catch (error) {
+          lastError = error;
         }
-      } catch (error) {
-        lastError = error;
       }
 
-      if (!foundModels.length) {
+      if (!foundModels.length && !isOpenCodeGo) {
         try {
-          const response = await fetch(`${this.baseUrl}/api/tags`);
+          const response = await fetch(`${normalizedBaseUrl}/api/tags`);
           if (response.ok) {
             respondedSuccessfully = true;
             const payload = (await response.json()) as OllamaTagsResponse;
@@ -344,9 +388,9 @@ export class EndpointManager {
         }
       }
 
-      if (!foundModels.length) {
+      if (!foundModels.length && !isOpenCodeGo) {
         try {
-          const sr = await fetch(`${this.baseUrl}/status`, {
+          const sr = await fetch(`${normalizedBaseUrl}/status`, {
             headers: { Authorization: `Bearer ${activeApiKey}` },
           });
           if (sr.ok) {
@@ -377,9 +421,13 @@ export class EndpointManager {
         this.getResolvedActiveEndpointUrl(),
       );
       if (activeHealth) {
-        activeHealth.healthy = true;
+        if (!isOpenCodeGo || !!configuredApiKey) {
+          activeHealth.healthy = true;
+        }
         activeHealth.lastChecked = Date.now();
-        activeHealth.error = undefined;
+        if (!isOpenCodeGo || !!configuredApiKey) {
+          activeHealth.error = undefined;
+        }
       }
 
       applyRefreshedModelsToSessions(
@@ -417,9 +465,9 @@ export class EndpointManager {
   }
 
   switchEndpoint(endpointUrl: string) {
-    const url = normalizeBaseUrl(endpointUrl);
+    const url = normalizeEndpointInputUrl(endpointUrl);
     const target = this.getEndpoints().find(
-      (endpoint) => normalizeBaseUrl(endpoint.url) === url,
+      (endpoint) => normalizeEndpointInputUrl(endpoint.url) === url,
     );
     if (!target) return;
     if (!this.endpointHealthMap.has(url)) {

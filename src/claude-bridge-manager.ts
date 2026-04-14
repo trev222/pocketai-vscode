@@ -7,30 +7,19 @@ import * as vscode from "vscode";
 import type { EndpointConfig } from "./types";
 import type { EndpointManager } from "./endpoint-manager";
 import { normalizeBaseUrl } from "./helpers";
-import { CODEX_BRIDGE_URL } from "./provider-constants";
+import { CLAUDE_BRIDGE_URL } from "./provider-constants";
 
-export const CODEX_BRIDGE_NAME = "Codex CLI Bridge";
-const CODEX_BRIDGE_ROOT_URL = `${CODEX_BRIDGE_URL}/`;
-const CODEX_BRIDGE_META_URL = `${CODEX_BRIDGE_URL}/codex/meta`;
-const CODEX_BRIDGE_POLL_MS = 5000;
+export const CLAUDE_BRIDGE_NAME = "Claude CLI Bridge";
+const CLAUDE_BRIDGE_ROOT_URL = `${CLAUDE_BRIDGE_URL}/`;
+const CLAUDE_BRIDGE_POLL_MS = 5000;
 
-export type CodexReasoningOption = {
-  reasoningEffort: string;
-  description: string;
-};
-
-export type CodexModelInfo = {
+export type ClaudeModelInfo = {
   id: string;
-  model: string;
   displayName: string;
   description: string;
-  hidden: boolean;
-  isDefault: boolean;
-  defaultReasoningEffort: string;
-  supportedReasoningEfforts: CodexReasoningOption[];
 };
 
-export type CodexConnectionState = {
+export type ClaudeConnectionState = {
   available: boolean;
   loggedIn: boolean;
   loginLabel: string;
@@ -38,9 +27,8 @@ export type CodexConnectionState = {
   endpointConfigured: boolean;
   endpointActive: boolean;
   endpointHealthy: boolean;
-  models: CodexModelInfo[];
+  models: ClaudeModelInfo[];
   selectedModel: string;
-  selectedReasoningEffort: string;
   busy: boolean;
   status: string;
   error: string;
@@ -53,7 +41,7 @@ type CommandResult = {
   notFound: boolean;
 };
 
-function defaultState(): CodexConnectionState {
+function defaultState(): ClaudeConnectionState {
   return {
     available: false,
     loggedIn: false,
@@ -64,36 +52,39 @@ function defaultState(): CodexConnectionState {
     endpointHealthy: false,
     models: [],
     selectedModel: "",
-    selectedReasoningEffort: "",
     busy: false,
-    status: "One click will add the endpoint and start Codex for you.",
+    status: "One click will add the endpoint and start Claude for you.",
     error: "",
   };
 }
 
-export class CodexBridgeManager {
+export class ClaudeBridgeManager {
   private bridgeProcess?: ChildProcessWithoutNullStreams;
   private loginTerminal?: vscode.Terminal;
   private refreshTimer?: ReturnType<typeof setInterval>;
-  private refreshInFlight?: Promise<CodexConnectionState>;
-  private state: CodexConnectionState = defaultState();
-  private codexBin = "codex";
+  private refreshInFlight?: Promise<ClaudeConnectionState>;
+  private state: ClaudeConnectionState = defaultState();
+  private claudeBin = "claude";
   private busyMessage = "";
   private lastError = "";
+  private usabilityProbe = {
+    expiresAt: 0,
+    usable: false,
+  };
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly outputChannel: vscode.OutputChannel,
   ) {}
 
-  getState(endpointMgr: EndpointManager): CodexConnectionState {
+  getState(endpointMgr: EndpointManager): ClaudeConnectionState {
     return this.withEndpointState(this.state, endpointMgr);
   }
 
   startPolling(
     endpointMgr: EndpointManager,
-    onChange: (state: CodexConnectionState) => void,
-    onReady?: (state: CodexConnectionState) => Promise<void>,
+    onChange: (state: ClaudeConnectionState) => void,
+    onReady?: (state: ClaudeConnectionState) => Promise<void>,
   ) {
     if (this.refreshTimer) return;
 
@@ -106,23 +97,21 @@ export class CodexBridgeManager {
     };
 
     void tick();
-    this.refreshTimer = setInterval(() => void tick(), CODEX_BRIDGE_POLL_MS);
+    this.refreshTimer = setInterval(() => void tick(), CLAUDE_BRIDGE_POLL_MS);
   }
 
-  async refresh(endpointMgr: EndpointManager): Promise<CodexConnectionState> {
+  async refresh(endpointMgr: EndpointManager): Promise<ClaudeConnectionState> {
     if (this.refreshInFlight) return this.refreshInFlight;
 
     this.refreshInFlight = (async () => {
-      const available = await this.resolveCodexBinary();
+      const available = await this.resolveClaudeBinary();
       const login = available
-        ? await this.getLoginStatus()
-        : { loggedIn: false, label: "Codex CLI not found" };
+        ? await this.getEffectiveLoginStatus()
+        : { loggedIn: false, label: "Claude CLI not found" };
       const bridgeRunning = await this.isBridgeResponsive();
-      const models = bridgeRunning
-        ? await this.getBridgeModels()
-        : [];
+      const models = bridgeRunning ? await this.getBridgeModels() : [];
 
-      const base: CodexConnectionState = {
+      const base: ClaudeConnectionState = {
         ...this.state,
         available,
         loggedIn: login.loggedIn,
@@ -155,18 +144,18 @@ export class CodexBridgeManager {
     endpointMgr: EndpointManager;
     defaultSystemPrompt: string;
     workspaceRoot?: string;
-  }): Promise<CodexConnectionState> {
+  }): Promise<ClaudeConnectionState> {
     const workspaceRoot = options.workspaceRoot || os.homedir();
 
     this.state.busy = true;
-    this.busyMessage = "Connecting to Codex...";
+    this.busyMessage = "Connecting to Claude...";
     this.lastError = "";
 
     try {
-      const available = await this.resolveCodexBinary();
+      const available = await this.resolveClaudeBinary();
       if (!available) {
         throw new Error(
-          "Codex CLI was not found. Install Codex or make the `codex` command available in PATH.",
+          "Claude CLI was not found. Install Claude Code or make the `claude` command available in PATH.",
         );
       }
 
@@ -175,21 +164,21 @@ export class CodexBridgeManager {
         options.defaultSystemPrompt,
       );
       options.endpointMgr.initEndpoints();
-      options.endpointMgr.switchEndpoint(CODEX_BRIDGE_URL);
+      options.endpointMgr.switchEndpoint(CLAUDE_BRIDGE_URL);
 
       await this.ensureBridgeRunning(workspaceRoot);
 
-      const login = await this.getLoginStatus();
+      const login = await this.getEffectiveLoginStatus();
       if (!login.loggedIn) {
         this.openLoginTerminal(workspaceRoot);
         this.busyMessage =
-          "Finish signing in to Codex in the terminal we opened.";
+          "Finish signing in to Claude in the terminal we opened.";
       } else {
-        this.busyMessage = "Codex CLI connected.";
+        this.busyMessage = "Claude CLI connected.";
       }
     } catch (error) {
       this.lastError =
-        error instanceof Error ? error.message : "Failed to connect to Codex.";
+        error instanceof Error ? error.message : "Failed to connect to Claude.";
       throw error;
     } finally {
       this.state.busy = false;
@@ -203,7 +192,7 @@ export class CodexBridgeManager {
     endpointMgr: EndpointManager;
     defaultSystemPrompt: string;
     workspaceRoot?: string;
-  }): Promise<CodexConnectionState> {
+  }): Promise<ClaudeConnectionState> {
     if (this.state.busy) {
       return this.refresh(options.endpointMgr);
     }
@@ -216,7 +205,7 @@ export class CodexBridgeManager {
     const workspaceRoot = options.workspaceRoot || os.homedir();
 
     this.state.busy = true;
-    this.busyMessage = "Starting Codex bridge...";
+    this.busyMessage = "Starting Claude bridge...";
     this.lastError = "";
 
     try {
@@ -227,13 +216,13 @@ export class CodexBridgeManager {
       options.endpointMgr.initEndpoints();
       await this.ensureBridgeRunning(workspaceRoot);
 
-      const login = await this.getLoginStatus();
+      const login = await this.getEffectiveLoginStatus();
       this.busyMessage = login.loggedIn
-        ? "Codex bridge is ready."
-        : "Codex bridge is ready. Sign in to finish connecting.";
+        ? "Claude bridge is ready."
+        : "Claude bridge is ready. Sign in to finish connecting.";
     } catch (error) {
       this.lastError =
-        error instanceof Error ? error.message : "Failed to start Codex bridge.";
+        error instanceof Error ? error.message : "Failed to start Claude bridge.";
     } finally {
       this.state.busy = false;
     }
@@ -244,18 +233,19 @@ export class CodexBridgeManager {
   async signIn(
     workspaceRoot: string | undefined,
     endpointMgr: EndpointManager,
-  ): Promise<CodexConnectionState> {
-    const available = await this.resolveCodexBinary();
+  ): Promise<ClaudeConnectionState> {
+    const available = await this.resolveClaudeBinary();
     if (!available) {
       const message =
-        "Codex CLI was not found. Install Codex or make the `codex` command available in PATH.";
+        "Claude CLI was not found. Install Claude Code or make the `claude` command available in PATH.";
       this.lastError = message;
       throw new Error(message);
     }
 
     this.lastError = "";
     this.openLoginTerminal(workspaceRoot || os.homedir());
-    this.busyMessage = "Finish signing in to Codex in the terminal we opened.";
+    this.busyMessage =
+      "Finish signing in to Claude in the terminal we opened.";
     return this.refresh(endpointMgr);
   }
 
@@ -270,26 +260,19 @@ export class CodexBridgeManager {
     }
   }
 
-  private async resolveCodexBinary(): Promise<boolean> {
-    const envCandidate = process.env.CODEX_BIN?.trim();
+  private async resolveClaudeBinary(): Promise<boolean> {
+    const envCandidate = process.env.CLAUDE_BIN?.trim();
     const candidates = Array.from(
       new Set(
         [
           envCandidate,
-          this.codexBin,
-          "codex",
+          this.claudeBin,
+          "claude",
           process.platform === "darwin"
-            ? "/Applications/Codex.app/Contents/Resources/codex"
+            ? "/usr/local/bin/claude"
             : "",
           process.platform === "darwin"
-            ? path.join(
-                os.homedir(),
-                "Applications",
-                "Codex.app",
-                "Contents",
-                "Resources",
-                "codex",
-              )
+            ? "/opt/homebrew/bin/claude"
             : "",
         ].filter((value): value is string => Boolean(value)),
       ),
@@ -298,7 +281,7 @@ export class CodexBridgeManager {
     for (const candidate of candidates) {
       const result = await this.runCommand(candidate, ["--version"], 5000);
       if (result.exitCode === 0) {
-        this.codexBin = candidate;
+        this.claudeBin = candidate;
         return true;
       }
     }
@@ -307,11 +290,33 @@ export class CodexBridgeManager {
   }
 
   private async getLoginStatus(): Promise<{ loggedIn: boolean; label: string }> {
-    const result = await this.runCommand(this.codexBin, ["login", "status"], 8000);
-    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const result = await this.runCommand(this.claudeBin, ["auth", "status"], 8000);
+    const stdout = result.stdout.trim();
+    const output = `${stdout}\n${result.stderr}`.trim();
+
+    if (stdout) {
+      try {
+        const payload = JSON.parse(stdout) as {
+          loggedIn?: boolean;
+          authMethod?: string;
+          apiProvider?: string;
+        };
+        if (payload.loggedIn) {
+          const providerSuffix = payload.apiProvider
+            ? ` (${payload.apiProvider})`
+            : "";
+          return {
+            loggedIn: true,
+            label: `Logged in${providerSuffix}`,
+          };
+        }
+      } catch {
+        // Fall back to string matching below.
+      }
+    }
 
     if (result.exitCode === 0 && /logged in/i.test(output)) {
-      return { loggedIn: true, label: result.stdout.trim() || "Logged in" };
+      return { loggedIn: true, label: output.split("\n")[0] ?? "Logged in" };
     }
 
     if (output) {
@@ -321,28 +326,83 @@ export class CodexBridgeManager {
     return { loggedIn: false, label: "Sign in required" };
   }
 
+  private async getEffectiveLoginStatus(): Promise<{
+    loggedIn: boolean;
+    label: string;
+  }> {
+    const login = await this.getLoginStatus();
+    if (login.loggedIn) {
+      this.usabilityProbe = {
+        expiresAt: Date.now() + 60_000,
+        usable: true,
+      };
+      return login;
+    }
+
+    const usable = await this.isClaudeUsableWithoutExplicitLogin();
+    if (usable) {
+      return {
+        loggedIn: true,
+        label: "Ready via Claude CLI",
+      };
+    }
+
+    return login;
+  }
+
+  private async isClaudeUsableWithoutExplicitLogin(): Promise<boolean> {
+    const now = Date.now();
+    if (this.usabilityProbe.expiresAt > now) {
+      return this.usabilityProbe.usable;
+    }
+
+    const result = await this.runCommand(
+      this.claudeBin,
+      [
+        "-p",
+        "Reply with exactly: pong",
+        "--output-format",
+        "json",
+        "--disable-slash-commands",
+        "--permission-mode",
+        "default",
+        "--tools",
+        "",
+      ],
+      12000,
+    );
+
+    const usable = result.exitCode === 0 && /pong/i.test(result.stdout);
+    this.usabilityProbe = {
+      expiresAt: now + 60_000,
+      usable,
+    };
+    return usable;
+  }
+
   private async ensureEndpointConfigured(
     config: vscode.WorkspaceConfiguration,
     defaultSystemPrompt: string,
   ) {
     const endpoints = (config.get<EndpointConfig[]>("endpoints") ?? []).slice();
-    const normalizedTarget = normalizeBaseUrl(CODEX_BRIDGE_URL);
+    const normalizedTarget = normalizeBaseUrl(CLAUDE_BRIDGE_URL);
     const existing = endpoints.find(
       (endpoint) => normalizeBaseUrl(endpoint.url) === normalizedTarget,
     );
 
     if (existing) {
-      existing.name = CODEX_BRIDGE_NAME;
-      existing.url = CODEX_BRIDGE_URL;
+      existing.name = CLAUDE_BRIDGE_NAME;
+      existing.url = CLAUDE_BRIDGE_URL;
+      existing.model = existing.model || "sonnet";
       existing.maxTokens = existing.maxTokens ?? 4096;
-      existing.reasoningEffort = existing.reasoningEffort ?? "";
       existing.systemPrompt = existing.systemPrompt || defaultSystemPrompt;
       existing.apiKey = "";
+      existing.reasoningEffort = "";
     } else {
       endpoints.push({
-        name: CODEX_BRIDGE_NAME,
-        url: CODEX_BRIDGE_URL,
-        model: "",
+        name: CLAUDE_BRIDGE_NAME,
+        url: CLAUDE_BRIDGE_URL,
+        model: "sonnet",
         reasoningEffort: "",
         maxTokens: 4096,
         systemPrompt: defaultSystemPrompt,
@@ -355,11 +415,7 @@ export class CodexBridgeManager {
 
   private async ensureBridgeRunning(workspaceRoot: string) {
     if (await this.isBridgeResponsive()) {
-      const models = await this.getBridgeModels();
-      if (models.length > 0) return;
-      throw new Error(
-        "An older Codex bridge is already running on 127.0.0.1:39458. Restart it once to enable model and reasoning controls.",
-      );
+      return;
     }
 
     if (this.bridgeProcess && this.bridgeProcess.exitCode === null) {
@@ -370,15 +426,15 @@ export class CodexBridgeManager {
     const scriptPath = path.join(
       this.context.extensionPath,
       "scripts",
-      "codex-openai-bridge.mjs",
+      "claude-openai-bridge.mjs",
     );
 
     const child = spawn(process.execPath, [scriptPath], {
       cwd: this.context.extensionPath,
       env: {
         ...process.env,
-        CODEX_BRIDGE_CWD: workspaceRoot,
-        CODEX_BRIDGE_CODEX_BIN: this.codexBin,
+        CLAUDE_BRIDGE_CWD: workspaceRoot,
+        CLAUDE_BRIDGE_CLAUDE_BIN: this.claudeBin,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -397,7 +453,7 @@ export class CodexBridgeManager {
         this.bridgeProcess = undefined;
       }
       if (code && !this.lastError) {
-        this.lastError = `Codex bridge exited with code ${code}.`;
+        this.lastError = `Claude bridge exited with code ${code}.`;
       }
     });
 
@@ -411,41 +467,55 @@ export class CodexBridgeManager {
     }
 
     throw new Error(
-      this.lastError || "Codex bridge failed to start. Check the PocketAI output channel.",
+      this.lastError || "Claude bridge failed to start. Check the PocketAI output channel.",
     );
   }
 
   private async isBridgeResponsive(): Promise<boolean> {
     try {
-      const response = await fetch(CODEX_BRIDGE_ROOT_URL, {
+      const response = await fetch(CLAUDE_BRIDGE_ROOT_URL, {
         signal: AbortSignal.timeout(1500),
       });
       if (!response.ok) return false;
       const payload = (await response.json()) as { name?: string };
-      return payload.name === "pocketai-codex-bridge";
+      return payload.name === "pocketai-claude-bridge";
     } catch {
       return false;
     }
   }
 
-  private async getBridgeModels(): Promise<CodexModelInfo[]> {
+  private async getBridgeModels(): Promise<ClaudeModelInfo[]> {
     try {
-      const response = await fetch(CODEX_BRIDGE_META_URL, {
+      const response = await fetch(`${CLAUDE_BRIDGE_URL}/v1/models`, {
         signal: AbortSignal.timeout(2000),
       });
       if (!response.ok) return [];
-      const payload = (await response.json()) as { data?: CodexModelInfo[] };
-      return Array.isArray(payload.data) ? payload.data : [];
+      const payload = (await response.json()) as {
+        data?: Array<{
+          id?: string;
+          display_name?: string;
+          description?: string;
+        }>;
+      };
+      return Array.isArray(payload.data)
+        ? payload.data
+            .map((model) => ({
+              id: model.id?.trim() ?? "",
+              displayName: model.display_name?.trim() || model.id?.trim() || "",
+              description: model.description?.trim() ?? "",
+            }))
+            .filter((model) => Boolean(model.id))
+        : [];
     } catch {
       return [];
     }
   }
 
   private withEndpointState(
-    state: CodexConnectionState,
+    state: ClaudeConnectionState,
     endpointMgr: EndpointManager,
-  ): CodexConnectionState {
-    const normalizedTarget = normalizeBaseUrl(CODEX_BRIDGE_URL);
+  ): ClaudeConnectionState {
+    const normalizedTarget = normalizeBaseUrl(CLAUDE_BRIDGE_URL);
     const endpoint = endpointMgr
       .getEndpoints()
       .find((configuredEndpoint) => normalizeBaseUrl(configuredEndpoint.url) === normalizedTarget);
@@ -457,7 +527,6 @@ export class CodexBridgeManager {
       endpointActive: normalizeBaseUrl(endpointMgr.activeEndpointUrl) === normalizedTarget,
       endpointHealthy: Boolean(health?.healthy),
       selectedModel: endpoint?.model ?? "",
-      selectedReasoningEffort: endpoint?.reasoningEffort ?? "",
     };
   }
 
@@ -475,42 +544,39 @@ export class CodexBridgeManager {
     const next = this.withEndpointState(defaultState(), params.endpointMgr);
 
     if (!params.available) {
-      return "Codex CLI not found yet. Install Codex to use this shortcut.";
+      return "Claude CLI not found yet. Install Claude Code to use this shortcut.";
     }
     if (!params.loggedIn) {
       return params.bridgeRunning
-        ? "Bridge is ready. Sign in to Codex to finish connecting."
-        : "Sign in to Codex to get started.";
-    }
-    if (params.bridgeRunning && params.modelsCount === 0) {
-      return "Connected, but the running bridge needs one restart to load model and reasoning controls.";
+        ? "Bridge is ready. Sign in to Claude to finish connecting."
+        : "Sign in to Claude to get started.";
     }
     if (next.endpointActive && next.endpointHealthy && params.bridgeRunning) {
-      return "Connected. PocketAI is ready to chat through Codex.";
+      return "Connected. PocketAI is ready to chat through Claude.";
     }
     if (params.bridgeRunning && next.endpointConfigured) {
       return next.endpointActive
-        ? "Codex bridge is running. Refreshing the connection..."
-        : "Codex is ready. Click Use on the Codex endpoint to switch over.";
+        ? "Claude bridge is running. Refreshing the connection..."
+        : "Claude is ready. Click Use on the Claude endpoint to switch over.";
     }
     if (next.endpointConfigured) {
-      return "Codex endpoint is saved. Click Connect to start it.";
+      return "Claude endpoint is saved. Click Connect to start it.";
     }
-    return "One click will add the endpoint and start Codex for you.";
+    return "One click will add the endpoint and start Claude for you.";
   }
 
   private openLoginTerminal(workspaceRoot: string) {
     const terminalAlive = this.loginTerminal?.exitStatus === undefined;
     if (!terminalAlive) {
       this.loginTerminal = vscode.window.createTerminal({
-        name: "PocketAI Codex Login",
+        name: "PocketAI Claude Login",
         cwd: workspaceRoot,
       });
     }
 
     this.loginTerminal?.show(true);
     this.loginTerminal?.sendText(
-      `${this.shellQuote(this.codexBin)} login`,
+      `${this.shellQuote(this.claudeBin)} auth login`,
       true,
     );
   }
@@ -526,7 +592,7 @@ export class CodexBridgeManager {
     for (const line of text.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      this.outputChannel.appendLine(`[Codex CLI Bridge] ${trimmed}`);
+      this.outputChannel.appendLine(`[Claude CLI Bridge] ${trimmed}`);
     }
   }
 
