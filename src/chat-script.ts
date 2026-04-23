@@ -59,6 +59,8 @@ export function getChatScript(brandIconUri: string): string {
     let streamChunkCount = 0;
     let spinnerVerbIndex = 0;
     let spinnerVerbTimer = null;
+    let spinnerVerbTypingTimer = null;
+    let spinnerVerbRendered = "";
     const messageStats = new Map();
     let editingSessionId = "";
     let isEditingSessionTitle = false;
@@ -76,7 +78,7 @@ export function getChatScript(brandIconUri: string): string {
       plan: "Plan",
     };
     const DEFAULT_STREAM_LABEL = "Thinking...";
-    const DEFAULT_STREAM_DETAIL = "Analyzing the request and deciding whether tools are needed.";
+    const DEFAULT_STREAM_DETAIL = "";
     const STREAM_SPINNER_VERBS = [
       "Womanizing",
       "Gaslighting",
@@ -1976,19 +1978,19 @@ export function getChatScript(brandIconUri: string): string {
       if (provided) return provided;
       const normalizedLabel = String(label || "").trim().toLowerCase();
       if (!normalizedLabel || normalizedLabel === DEFAULT_STREAM_LABEL.toLowerCase()) {
-        return DEFAULT_STREAM_DETAIL;
+        return "";
       }
       if (normalizedLabel.includes("continuing")) {
         return "Picking up from the previous partial response.";
       }
       if (normalizedLabel.includes("thinking")) {
-        return DEFAULT_STREAM_DETAIL;
+        return "";
       }
       return "Working on the next step.";
     }
 
     function getActiveSpinnerVerb() {
-      return STREAM_SPINNER_VERBS[spinnerVerbIndex % STREAM_SPINNER_VERBS.length] || "Thinking";
+      return spinnerVerbRendered || STREAM_SPINNER_VERBS[spinnerVerbIndex % STREAM_SPINNER_VERBS.length] || "Thinking";
     }
 
     function advanceSpinnerVerb() {
@@ -1996,21 +1998,48 @@ export function getChatScript(brandIconUri: string): string {
       spinnerVerbIndex = (spinnerVerbIndex + 1) % STREAM_SPINNER_VERBS.length;
     }
 
+    function stopSpinnerVerbTyping() {
+      if (spinnerVerbTypingTimer) {
+        clearInterval(spinnerVerbTypingTimer);
+        spinnerVerbTypingTimer = null;
+      }
+    }
+
+    function typeSpinnerVerb(word) {
+      stopSpinnerVerbTyping();
+      const target = String(word || "").trim();
+      spinnerVerbRendered = "";
+      refreshStreamingView();
+      if (!target) return;
+
+      let idx = 0;
+      spinnerVerbTypingTimer = setInterval(() => {
+        idx += 1;
+        spinnerVerbRendered = target.slice(0, idx);
+        refreshStreamingView();
+        if (idx >= target.length) {
+          stopSpinnerVerbTyping();
+        }
+      }, 70);
+    }
+
     function stopSpinnerVerbRotation() {
       if (spinnerVerbTimer) {
         clearInterval(spinnerVerbTimer);
         spinnerVerbTimer = null;
       }
+      stopSpinnerVerbTyping();
     }
 
     function startSpinnerVerbRotation() {
       stopSpinnerVerbRotation();
       if (!STREAM_SPINNER_VERBS.length) return;
       spinnerVerbIndex = Math.floor(Math.random() * STREAM_SPINNER_VERBS.length);
+      typeSpinnerVerb(STREAM_SPINNER_VERBS[spinnerVerbIndex]);
       spinnerVerbTimer = setInterval(() => {
         advanceSpinnerVerb();
-        refreshStreamingView();
-      }, 1650);
+        typeSpinnerVerb(STREAM_SPINNER_VERBS[spinnerVerbIndex]);
+      }, 6600);
     }
 
     function inferStreamingPhase(label) {

@@ -47,8 +47,9 @@ export interface MessageHandlerDeps {
     sessionId: string,
     approved: boolean,
   ) => Promise<void>;
-  refreshModels: () => Promise<void>;
-  selectEndpoint: (endpointUrl: string) => Promise<void>;
+  refreshModels: (sessionId?: string) => Promise<void>;
+  selectEndpoint: (sessionId: string, endpointUrl: string) => Promise<void>;
+  supportsReasoningEffort: (sessionId: string) => boolean;
   postState: () => void;
   postStateToWebview: (webview: vscode.Webview, sessionId: string) => void;
   openForkedPanel: (forked: ReturnType<SessionManager["forkSession"]>) => void;
@@ -72,7 +73,7 @@ export function setupChatMessageHandler(
       const sessionId = getSessionId();
       switch (message.type) {
         case "ready":
-          await deps.refreshModels();
+          await deps.refreshModels(getSessionId());
           deps.postStateToWebview(webview, getSessionId());
           return;
 
@@ -97,7 +98,7 @@ export function setupChatMessageHandler(
         case "selectReasoningEffort": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
-          if (!deps.endpointMgr.getActiveEndpointCapabilities().supportsReasoningEffort) {
+          if (!deps.supportsReasoningEffort(sessionId)) {
             return;
           }
           deps.sessionMgr.setSessionReasoningEffort(
@@ -110,7 +111,7 @@ export function setupChatMessageHandler(
         }
 
         case "refreshModels":
-          await deps.refreshModels();
+          await deps.refreshModels(sessionId);
           deps.postState();
           return;
 
@@ -181,7 +182,7 @@ export function setupChatMessageHandler(
         }
 
         case "selectEndpoint":
-          await deps.selectEndpoint(message.endpointUrl);
+          await deps.selectEndpoint(sessionId, message.endpointUrl);
           return;
 
         case "exportSession": {
@@ -214,12 +215,10 @@ export function setupChatMessageHandler(
             deps.sessionMgr.getSessionSummaries(),
             deps.sessionMgr.sessions.values(),
           );
-          for (const wv of deps.webviews) {
-            wv.postMessage({
-              type: "filteredSessions",
-              sessions: filtered,
-            } satisfies ExtensionToWebviewMessage);
-          }
+          webview.postMessage({
+            type: "filteredSessions",
+            sessions: filtered,
+          } satisfies ExtensionToWebviewMessage);
           return;
         }
 

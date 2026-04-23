@@ -35,17 +35,48 @@ export function resolveActiveEndpointUrl(options: {
   );
 }
 
+export function normalizeSessionEndpointSelections(
+  sessions: Iterable<Pick<ChatSession, "selectedEndpoint">>,
+  knownEndpointUrls: Iterable<string>,
+  fallbackEndpointUrl: string,
+): boolean {
+  const normalizedKnownUrls = new Set(
+    Array.from(knownEndpointUrls)
+      .map((endpointUrl) => normalizeBaseUrl(endpointUrl))
+      .filter(Boolean),
+  );
+  const normalizedFallbackEndpointUrl = normalizeBaseUrl(fallbackEndpointUrl);
+  let changed = false;
+
+  for (const session of sessions) {
+    const normalizedSelectedEndpoint = normalizeBaseUrl(
+      session.selectedEndpoint ?? "",
+    );
+    const nextSelectedEndpoint =
+      normalizedSelectedEndpoint &&
+      normalizedKnownUrls.has(normalizedSelectedEndpoint)
+        ? normalizedSelectedEndpoint
+        : normalizedFallbackEndpointUrl;
+    if (!nextSelectedEndpoint || session.selectedEndpoint === nextSelectedEndpoint) {
+      continue;
+    }
+
+    session.selectedEndpoint = nextSelectedEndpoint;
+    changed = true;
+  }
+
+  return changed;
+}
+
 export function syncSessionsToActiveEndpoint(
   sessions: Iterable<Pick<ChatSession, "selectedEndpoint">>,
   activeEndpointUrl: string,
 ): boolean {
-  let changed = false;
-  for (const session of sessions) {
-    if (session.selectedEndpoint === activeEndpointUrl) continue;
-    session.selectedEndpoint = activeEndpointUrl;
-    changed = true;
-  }
-  return changed;
+  return normalizeSessionEndpointSelections(
+    sessions,
+    [activeEndpointUrl],
+    activeEndpointUrl,
+  );
 }
 
 export function applyRefreshedModelsToSessions(

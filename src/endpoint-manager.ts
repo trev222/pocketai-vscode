@@ -66,6 +66,8 @@ function filterAndSortChatModels(models: string[]): string[] {
 
 export class EndpointManager {
   readonly endpointHealthMap = new Map<string, EndpointHealth>();
+  readonly modelsByEndpoint = new Map<string, string[]>();
+  readonly statusSummaryByEndpoint = new Map<string, string>();
   activeEndpointUrl = "";
   models: string[] = [];
   statusSummary = "status unavailable";
@@ -75,14 +77,14 @@ export class EndpointManager {
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
-  private resolveCurrentActiveEndpoint(): {
+  private resolveEndpoint(endpointUrl?: string): {
     url: string;
     config: EndpointConfig;
   } {
     const endpoints = this.getEndpoints();
-    const normalizedActive = normalizeBaseUrl(this.activeEndpointUrl);
+    const normalizedRequested = normalizeBaseUrl(endpointUrl ?? "");
     const match = endpoints.find(
-      (ep) => normalizeEndpointInputUrl(ep.url) === normalizedActive,
+      (ep) => normalizeEndpointInputUrl(ep.url) === normalizedRequested,
     );
     const config =
       match ??
@@ -99,7 +101,7 @@ export class EndpointManager {
   }
 
   get baseUrl() {
-    return this.resolveCurrentActiveEndpoint().url;
+    return this.resolveEndpoint(this.activeEndpointUrl).url;
   }
 
   getConfiguredEndpoints(): EndpointConfig[] {
@@ -159,11 +161,19 @@ export class EndpointManager {
   }
 
   getActiveEndpointConfig(): EndpointConfig {
-    return this.resolveCurrentActiveEndpoint().config;
+    return this.resolveEndpoint(this.activeEndpointUrl).config;
+  }
+
+  getEndpointConfig(endpointUrl?: string): EndpointConfig {
+    return this.resolveEndpoint(endpointUrl || this.activeEndpointUrl).config;
   }
 
   getResolvedActiveEndpointUrl(): string {
-    return this.resolveCurrentActiveEndpoint().url;
+    return this.resolveEndpoint(this.activeEndpointUrl).url;
+  }
+
+  getResolvedEndpointUrl(endpointUrl?: string): string {
+    return this.resolveEndpoint(endpointUrl || this.activeEndpointUrl).url;
   }
 
   getEndpointCapabilities(endpointUrl: string): EndpointCapabilities {
@@ -174,6 +184,25 @@ export class EndpointManager {
 
   getActiveEndpointCapabilities(): EndpointCapabilities {
     return this.getEndpointCapabilities(this.getResolvedActiveEndpointUrl());
+  }
+
+  getEndpointModels(endpointUrl?: string): string[] {
+    const resolvedEndpointUrl = this.getResolvedEndpointUrl(endpointUrl);
+    return this.modelsByEndpoint.get(resolvedEndpointUrl) ?? [];
+  }
+
+  getEndpointStatusSummary(endpointUrl?: string): string {
+    const resolvedEndpointUrl = this.getResolvedEndpointUrl(endpointUrl);
+    return (
+      this.statusSummaryByEndpoint.get(resolvedEndpointUrl) ??
+      "status unavailable"
+    );
+  }
+
+  private syncActiveEndpointStateFromCache() {
+    const resolvedActiveEndpointUrl = this.getResolvedActiveEndpointUrl();
+    this.models = this.getEndpointModels(resolvedActiveEndpointUrl);
+    this.statusSummary = this.getEndpointStatusSummary(resolvedActiveEndpointUrl);
   }
 
   initEndpoints() {
@@ -204,6 +233,7 @@ export class EndpointManager {
       });
       void this.persistActiveEndpointUrl();
     }
+    this.syncActiveEndpointStateFromCache();
   }
 
   startHealthChecks(
@@ -323,24 +353,34 @@ export class EndpointManager {
   }
 
   async refreshModels(
+    endpointUrl: string | undefined,
     sessions: Map<string, ChatSession>,
     saveState: () => Promise<void>,
     getPreferredModel: (models: string[]) => string,
   ) {
+    const resolvedEndpointUrl = this.getResolvedEndpointUrl(endpointUrl);
+    const endpointConfig = this.getEndpointConfig(resolvedEndpointUrl);
+    const sessionsForEndpoint = Array.from(sessions.values()).filter((session) => {
+      const sessionEndpointUrl = this.getResolvedEndpointUrl(
+        session.selectedEndpoint || resolvedEndpointUrl,
+      );
+      return sessionEndpointUrl === resolvedEndpointUrl;
+    });
+
     try {
-      this.statusSummary = "checking...";
+      let nextStatusSummary = "checking...";
       let foundModels: string[] = [];
       let respondedSuccessfully = false;
       let lastError: unknown;
-      const normalizedBaseUrl = normalizeEndpointInputUrl(this.baseUrl);
+      const normalizedBaseUrl = normalizeEndpointInputUrl(resolvedEndpointUrl);
       const isOpenCodeGo = isOpenCodeGoEndpoint(normalizedBaseUrl);
-      const configuredApiKey = this.getActiveEndpointConfig().apiKey?.trim() || "";
+      const configuredApiKey = endpointConfig.apiKey?.trim() || "";
       const activeApiKey = configuredApiKey || "local-pocketai";
 
       if (isOpenCodeGo) {
         respondedSuccessfully = true;
         foundModels = getOpenCodeGoChatModels();
-        this.statusSummary = getOpenCodeGoStatusLabel(!!configuredApiKey);
+        nextStatusSummary = getOpenCodeGoStatusLabel(!!configuredApiKey);
       } else {
         try {
           const response = await fetch(`${normalizedBaseUrl}/v1/models`, {
@@ -357,7 +397,7 @@ export class EndpointManager {
               ),
             );
           } else {
-            this.statusSummary = `HTTP ${response.status}`;
+            nextStatusSummary = `HTTP ${response.status}`;
           }
         } catch (error) {
           lastError = error;
@@ -378,10 +418,10 @@ export class EndpointManager {
               ),
             );
             if (foundModels.length) {
-              this.statusSummary = "Connected via Ollama";
+              nextStatusSummary = "Connected via Ollama";
             }
           } else if (!respondedSuccessfully) {
-            this.statusSummary = `HTTP ${response.status}`;
+            nextStatusSummary = `HTTP ${response.status}`;
           }
         } catch (error) {
           if (!lastError) lastError = error;
@@ -396,12 +436,12 @@ export class EndpointManager {
           if (sr.ok) {
             respondedSuccessfully = true;
             const sp = (await sr.json()) as StatusResponse;
-            this.statusSummary = JSON.stringify(sp);
+            nextStatusSummary = JSON.stringify(sp);
             if (sp.defaultModelId?.trim()) {
               foundModels = [sp.defaultModelId.trim()];
             }
           } else if (!respondedSuccessfully) {
-            this.statusSummary = `HTTP ${sr.status}`;
+            nextStatusSummary = `HTTP ${sr.status}`;
           }
         } catch (error) {
           if (!lastError) lastError = error;
@@ -415,11 +455,10 @@ export class EndpointManager {
         );
       }
 
-      this.models = filterAndSortChatModels(foundModels);
+      const filteredModels = filterAndSortChatModels(foundModels);
+      this.modelsByEndpoint.set(resolvedEndpointUrl, filteredModels);
 
-      const activeHealth = this.endpointHealthMap.get(
-        this.getResolvedActiveEndpointUrl(),
-      );
+      const activeHealth = this.endpointHealthMap.get(resolvedEndpointUrl);
       if (activeHealth) {
         if (!isOpenCodeGo || !!configuredApiKey) {
           activeHealth.healthy = true;
@@ -431,36 +470,37 @@ export class EndpointManager {
       }
 
       applyRefreshedModelsToSessions(
-        sessions.values(),
-        this.models,
+        sessionsForEndpoint,
+        filteredModels,
         getPreferredModel,
       );
 
-      if (this.models.length) {
-        this.statusSummary = `OK — ${this.models.length} model(s)`;
-      } else if (!this.statusSummary || this.statusSummary === "checking...") {
-        this.statusSummary = "Server reachable, but no models found.";
+      if (filteredModels.length) {
+        nextStatusSummary = `OK — ${filteredModels.length} model(s)`;
+      } else if (!nextStatusSummary || nextStatusSummary === "checking...") {
+        nextStatusSummary = "Server reachable, but no models found.";
       }
+      this.statusSummaryByEndpoint.set(resolvedEndpointUrl, nextStatusSummary);
     } catch (error) {
-      this.models = [];
-      this.statusSummary =
+      const nextStatusSummary =
         error instanceof Error ? error.message : "status unavailable";
+      this.modelsByEndpoint.set(resolvedEndpointUrl, []);
+      this.statusSummaryByEndpoint.set(resolvedEndpointUrl, nextStatusSummary);
       const message =
         error instanceof Error
           ? error.message
           : "Could not reach localhost. Is Ollama or PocketAI running?";
-      for (const session of sessions.values()) {
+      for (const session of sessionsForEndpoint) {
         session.status = message;
       }
-      const activeHealth = this.endpointHealthMap.get(
-        this.getResolvedActiveEndpointUrl(),
-      );
+      const activeHealth = this.endpointHealthMap.get(resolvedEndpointUrl);
       if (activeHealth) {
         activeHealth.healthy = false;
         activeHealth.lastChecked = Date.now();
         activeHealth.error = message;
       }
     }
+    this.syncActiveEndpointStateFromCache();
     await saveState();
   }
 
@@ -479,6 +519,7 @@ export class EndpointManager {
       });
     }
     this.activeEndpointUrl = url;
+    this.syncActiveEndpointStateFromCache();
     void this.persistActiveEndpointUrl();
     this.updateStatusBar();
   }
@@ -506,11 +547,13 @@ export class EndpointManager {
     sessions?: Map<string, ChatSession>,
   ) {
     if (!this.statusBarItem) return;
-    const resolvedActiveEndpointUrl = this.getResolvedActiveEndpointUrl();
-    const health = this.endpointHealthMap.get(resolvedActiveEndpointUrl);
     const session = sidebarSessionId
       ? sessions?.get(sidebarSessionId)
       : undefined;
+    const resolvedEndpointUrl = this.getResolvedEndpointUrl(
+      session?.selectedEndpoint || this.activeEndpointUrl,
+    );
+    const health = this.endpointHealthMap.get(resolvedEndpointUrl);
     const model = session?.selectedModel || "no model";
     const mode = session?.mode || "ask";
     const busy = session?.busy ?? false;
@@ -535,7 +578,10 @@ export class EndpointManager {
 
     this.statusBarItem.text = `${statusIcon} ${model} ${modeIcon}[${mode}] ${statusLabel}`;
 
-    const endpointName = health?.name ?? "PocketAI";
+    const endpointName =
+      health?.name ??
+      this.getEndpointConfig(resolvedEndpointUrl).name ??
+      "PocketAI";
     const cumTokens = session?.cumulativeTokens;
     const tokenInfo = cumTokens
       ? `\nTokens used: ${cumTokens.prompt + cumTokens.completion}`

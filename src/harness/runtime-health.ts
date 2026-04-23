@@ -4,12 +4,29 @@ import type { ChatSession, HarnessRuntimeHealth } from "../types";
 export function buildHarnessRuntimeHealth(options: {
   session: ChatSession;
   endpointMgr: EndpointManager;
+  endpointUrl?: string;
+  availableModels?: string[];
   estimatedTokens: number;
   contextWindowSize: number;
 }): HarnessRuntimeHealth {
-  const { session, endpointMgr, estimatedTokens, contextWindowSize } = options;
-  const health = endpointMgr.endpointHealthMap.get(endpointMgr.activeEndpointUrl);
-  const capabilities = endpointMgr.getActiveEndpointCapabilities();
+  const {
+    session,
+    endpointMgr,
+    endpointUrl,
+    availableModels,
+    estimatedTokens,
+    contextWindowSize,
+  } = options;
+  const resolvedEndpointUrl =
+    endpointUrl ||
+    (endpointMgr as Pick<EndpointManager, "activeEndpointUrl">).activeEndpointUrl ||
+    "";
+  const health = endpointMgr.endpointHealthMap.get(resolvedEndpointUrl);
+  const capabilities =
+    typeof (endpointMgr as EndpointManager).getEndpointCapabilities === "function"
+      ? endpointMgr.getEndpointCapabilities(resolvedEndpointUrl)
+      : endpointMgr.getActiveEndpointCapabilities();
+  const resolvedAvailableModels = availableModels ?? endpointMgr.models;
   const pendingApprovals = session.harnessState.pendingApprovals || [];
   const backgroundTasks = session.harnessState.backgroundTasks || [];
   const runningTasks = backgroundTasks.filter((task) => task.status === "running");
@@ -30,9 +47,9 @@ export function buildHarnessRuntimeHealth(options: {
     actions.add("refresh-models");
   }
 
-  if (!endpointMgr.models.length) {
+  if (!resolvedAvailableModels.length) {
     level = level === "error" ? "error" : "warning";
-    issues.push("No models are currently loaded for the active endpoint.");
+    issues.push("No models are currently loaded for this session endpoint.");
     suggestions.push("Refresh models or verify the endpoint is exposing chat models.");
     actions.add("refresh-models");
   }

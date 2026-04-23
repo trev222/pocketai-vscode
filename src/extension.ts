@@ -48,6 +48,7 @@ import {
   buildProviderChatControlsState,
 } from "./provider-chat-state";
 import {
+  CLAUDE_BRIDGE_URL,
   CODEX_BRIDGE_URL,
   LOCAL_POCKETAI_URL,
 } from "./provider-constants";
@@ -58,7 +59,7 @@ import {
 } from "./opencode-go";
 import { getXAIProviderName, XAI_BASE_URL } from "./xai";
 import { fetchPocketAiRemoteEndpoints } from "./pocketai-remote-devices";
-import { syncSessionsToActiveEndpoint } from "./endpoint-workflows";
+import { normalizeSessionEndpointSelections } from "./endpoint-workflows";
 import {
   bindPanelToSession,
   getPanelsBoundToSession,
@@ -229,7 +230,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       createdInitialSession = true;
     }
     this.endpointMgr.initEndpoints();
-    const endpointSelectionsSynced = this.syncSessionEndpointSelections();
+    const endpointSelectionsSynced = this.normalizeSessionEndpointSelections();
     if (
       shouldPersistStartupState({
         createdInitialSession,
@@ -260,9 +261,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
           state.loggedIn &&
           state.bridgeRunning &&
           codexIsActive &&
-          (!state.endpointHealthy || this.endpointMgr.models.length === 0)
+          (!state.endpointHealthy ||
+            this.endpointMgr.getEndpointModels(CODEX_BRIDGE_URL).length === 0)
         ) {
-          await this.refreshModels();
+          await this.refreshModels(CODEX_BRIDGE_URL);
         }
       },
     );
@@ -277,9 +279,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
           state.loggedIn &&
           state.bridgeRunning &&
           claudeIsActive &&
-          (!state.endpointHealthy || this.endpointMgr.models.length === 0)
+          (!state.endpointHealthy ||
+            this.endpointMgr.getEndpointModels(CLAUDE_BRIDGE_URL).length === 0)
         ) {
-          await this.refreshModels();
+          await this.refreshModels(CLAUDE_BRIDGE_URL);
         }
       },
     );
@@ -348,31 +351,40 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     return vscode.workspace.getConfiguration("pocketai");
   }
 
-  private getStreamingDeps(): StreamingDeps {
+  private getStreamingDeps(
+    session: Pick<import("./types").ChatSession, "id" | "selectedEndpoint">,
+  ): StreamingDeps {
+    const endpointUrl = this.endpointMgr.getResolvedEndpointUrl(
+      session.selectedEndpoint,
+    );
+    const endpointConfig = this.endpointMgr.getEndpointConfig(endpointUrl);
     return {
-      baseUrl: this.endpointMgr.baseUrl,
-      apiKey: this.endpointMgr.getActiveEndpointConfig().apiKey || "local-pocketai",
+      baseUrl: endpointUrl,
+      apiKey: endpointConfig.apiKey || "local-pocketai",
       config: this.config,
       outputChannel: this.outputChannel,
       projectInstructionsCache: this.projectInstructionsCache,
       getActiveSystemPrompt: () =>
-        (this.endpointMgr.getActiveEndpointConfig().systemPrompt ?? "").trim(),
+        (endpointConfig.systemPrompt ?? "").trim(),
       getActiveReasoningEffort: () =>
-        (this.endpointMgr.getActiveEndpointConfig().reasoningEffort ?? "").trim(),
+        (endpointConfig.reasoningEffort ?? "").trim(),
       getActiveMaxTokens: () =>
-        this.endpointMgr.getActiveEndpointConfig().maxTokens ?? DEFAULT_MAX_TOKENS,
+        endpointConfig.maxTokens ?? DEFAULT_MAX_TOKENS,
       getActiveEndpointCapabilities: () =>
-        this.endpointMgr.getActiveEndpointCapabilities(),
-      broadcastToWebviews: (msg) => this.broadcastToWebviews(msg),
+        this.endpointMgr.getEndpointCapabilities(endpointUrl),
+      broadcastToWebviews: (msg) =>
+        this.postMessageToSessionWebviews(session.id, msg),
       memoryContext: this.memoryMgr?.buildMemoryContext() || "",
     };
   }
 
-  private getToolLoopDeps(): ToolLoopDeps {
+  private getToolLoopDeps(
+    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
+  ): ToolLoopDeps {
     return {
       config: this.config,
       outputChannel: this.outputChannel,
-      streamingDeps: this.getStreamingDeps(),
+      streamingDeps: this.getStreamingDeps(session),
       buildWorkspaceContext: (session) => buildWorkspaceContext(this.config, session),
       postState: () => this.postState(),
       mcpManager: this.mcpManager,
@@ -384,12 +396,13 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
         const contextWindow =
           this.config.get<number>("contextWindowSize") ?? DEFAULT_CONTEXT_WINDOW_SIZE;
         const includeReportedUsage =
-          this.endpointMgr.getActiveEndpointCapabilities().usesReportedUsageForContext;
+          this.getSessionEndpointCapabilities(session)
+            .usesReportedUsageForContext;
         const estimated = estimateSessionTokens(
           session,
           this.config,
           this.projectInstructionsCache,
-          this.endpointMgr.getActiveEndpointConfig().systemPrompt ?? "",
+          this.getSessionEndpointConfig(session).systemPrompt ?? "",
           {
             includeWorkspaceContext: true,
             includeReportedUsage,
@@ -402,16 +415,18 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
           );
           await this.sessionMgr.compactSession(
             session,
-            this.getStreamingDeps(),
+            this.getStreamingDeps(session),
             (s) =>
               estimateSessionTokens(
                 s,
                 this.config,
                 this.projectInstructionsCache,
-                this.endpointMgr.getActiveEndpointConfig().systemPrompt ?? "",
+                this.getSessionEndpointConfig(s).systemPrompt ?? "",
                 {
                   includeWorkspaceContext: true,
-                  includeReportedUsage,
+                  includeReportedUsage:
+                    this.getSessionEndpointCapabilities(s)
+                      .usesReportedUsageForContext,
                 },
               ),
             () => this.postState(),
@@ -490,7 +505,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       this.endpointMgr.getActiveEndpointCapabilities().kind ===
       "codex-bridge"
     ) {
-      await this.refreshModels();
+      await this.refreshModels(CODEX_BRIDGE_URL);
       return;
     }
     this.pushSettingsState();
@@ -513,7 +528,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       this.endpointMgr.getActiveEndpointCapabilities().kind ===
       "claude-bridge"
     ) {
-      await this.refreshModels();
+      await this.refreshModels(this.endpointMgr.getResolvedActiveEndpointUrl());
       return;
     }
     this.pushSettingsState();
@@ -521,12 +536,17 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.updateStatusBar();
   }
 
-  private async handleEndpointSelection(endpointUrl: string) {
-    this.endpointMgr.switchEndpoint(endpointUrl);
-    if (this.syncSessionEndpointSelections()) {
-      await this.sessionMgr.saveState();
-    }
-    const providerKind = this.getEndpointCapabilities(endpointUrl).kind;
+  private async handleEndpointSelection(sessionId: string, endpointUrl: string) {
+    const session = this.sessionMgr.requireSession(sessionId);
+    if (!session) return;
+
+    const resolvedEndpointUrl = this.endpointMgr.getResolvedEndpointUrl(endpointUrl);
+    session.selectedEndpoint = resolvedEndpointUrl;
+    this.sessionMgr.touchSession(session);
+    this.endpointMgr.switchEndpoint(resolvedEndpointUrl);
+    await this.sessionMgr.saveState();
+
+    const providerKind = this.getEndpointCapabilities(resolvedEndpointUrl).kind;
     if (providerKind === "codex-bridge") {
       await this.autoConnectConfiguredCodexBridge();
       return;
@@ -535,7 +555,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       await this.autoConnectConfiguredClaudeBridge();
       return;
     }
-    await this.refreshModels();
+    await this.refreshModels(resolvedEndpointUrl);
   }
 
   /* ── Project Instructions (.pocketai.md / AGENTS.md / CLAUDE.md) ── */
@@ -656,8 +676,11 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
   }
 
   async openPanel() {
-    const session = this.sessionMgr.createSession(this.endpointMgr.models);
-    session.selectedEndpoint = this.endpointMgr.activeEndpointUrl;
+    const defaultEndpointUrl = this.endpointMgr.getResolvedActiveEndpointUrl();
+    const session = this.sessionMgr.createSession(
+      this.endpointMgr.getEndpointModels(defaultEndpointUrl),
+    );
+    session.selectedEndpoint = defaultEndpointUrl;
     const panel = vscode.window.createWebviewPanel(
       PocketAIViewProvider.panelType,
       this.getPanelTitle(session.id),
@@ -812,7 +835,9 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
             break;
           }
           case "setActiveEndpoint": {
-            await this.handleEndpointSelection(String(message.url || ""));
+            const endpointUrl = normalizeEndpointInputUrl(String(message.url || ""));
+            this.endpointMgr.switchEndpoint(endpointUrl);
+            await this.refreshModels(endpointUrl);
             break;
           }
           case "refreshEndpoints": {
@@ -991,7 +1016,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
                   this.endpointMgr.getResolvedActiveEndpointUrl() === epUrl &&
                   (key === "apiKey" || key === "url")
                 ) {
-                  await this.refreshModels();
+                  await this.refreshModels(epUrl);
                   this.postState();
                 }
                 this.pushSettingsState();
@@ -1079,11 +1104,11 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       session,
       prompt: initialTrimmed,
       availableSkills: listHarnessSkills(),
-      preferredModel: this.sessionMgr.getPreferredModel(this.endpointMgr.models),
+      preferredModel: this.sessionMgr.getPreferredModel(
+        this.endpointMgr.getEndpointModels(session.selectedEndpoint),
+      ),
       fallbackTitleNumber: this.sessionMgr.nextSessionNumber - 1,
-      providerKind: this.getEndpointCapabilities(
-        this.endpointMgr.getResolvedActiveEndpointUrl(),
-      ).kind,
+      providerKind: this.getSessionEndpointCapabilities(session).kind,
     });
     if (preparedPrompt.kind === "handled") {
       if (preparedPrompt.titleChanged) {
@@ -1126,7 +1151,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     if (promptStart.needsSkillPreflight) {
       const skillPreflightContext = await buildSkillPreflightContext(
         session,
-        this.getToolLoopDeps(),
+        this.getToolLoopDeps(session),
       );
       session.skillPreflightContext = [
         transientSystemPrompt,
@@ -1141,11 +1166,11 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     session.currentRequest = new AbortController();
     clearReadTracking();
     this.outputChannel.appendLine(
-      `→ ${this.endpointMgr.baseUrl}/v1/chat/completions [${session.selectedModel}]`,
+      `→ ${this.endpointMgr.getResolvedEndpointUrl(session.selectedEndpoint)}/v1/chat/completions [${session.selectedModel}]`,
     );
 
     try {
-      loopResult = await runToolLoop(session, this.getToolLoopDeps());
+      loopResult = await runToolLoop(session, this.getToolLoopDeps(session));
       session.status =
         getPostLoopReadyStatus(loopResult.stoppedBecause) ?? session.status;
       this.outputChannel.appendLine(
@@ -1187,10 +1212,11 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       memoryMgr: this.memoryMgr,
       config: this.config,
       outputChannel: this.outputChannel,
-      getStreamingDeps: () => this.getStreamingDeps(),
+      getStreamingDeps: (session) => this.getStreamingDeps(session),
       estimateTokens: (s) => this.estimateTokens(s),
-      refreshModels: () => this.refreshModels(),
-      selectEndpoint: (endpointUrl) => this.handleEndpointSelection(endpointUrl),
+      refreshModels: (endpointUrl) => this.refreshModels(endpointUrl),
+      selectEndpoint: (sessionId, endpointUrl) =>
+        this.handleEndpointSelection(sessionId, endpointUrl),
       postState: () => this.postState(),
       updateStatusBar: () => this.updateStatusBar(),
       openForkedPanel: (f) => this.openForkedPanel(f),
@@ -1208,9 +1234,10 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
     tc: import("./types").ToolCall,
   ): Promise<string> {
+    const deps = this.getToolLoopDeps(session);
     const runtime = new DefaultHarnessToolRuntime(
-      this.getToolLoopDeps(),
-      createHarnessToolRegistry(this.getToolLoopDeps()),
+      deps,
+      createHarnessToolRegistry(deps),
     );
     return runtime.execute(session, tc);
   }
@@ -1300,7 +1327,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.postState();
 
     try {
-      loopResult = await runToolLoop(session, this.getToolLoopDeps());
+      loopResult = await runToolLoop(session, this.getToolLoopDeps(session));
       session.status =
         getPostLoopReadyStatus(loopResult.stoppedBecause) ?? session.status;
     } catch (error) {
@@ -1339,16 +1366,20 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
 
   /* ── Session helpers ── */
 
-  private syncSessionEndpointSelections() {
-    return syncSessionsToActiveEndpoint(
+  private normalizeSessionEndpointSelections() {
+    return normalizeSessionEndpointSelections(
       this.sessionMgr.sessions.values(),
-      this.endpointMgr.activeEndpointUrl,
+      this.endpointMgr.getEndpoints().map((endpoint) => endpoint.url),
+      this.endpointMgr.getResolvedActiveEndpointUrl(),
     );
   }
 
   private createSessionForPanel(panel: vscode.WebviewPanel): string {
-    const session = this.sessionMgr.createSession(this.endpointMgr.models);
-    session.selectedEndpoint = this.endpointMgr.activeEndpointUrl;
+    const defaultEndpointUrl = this.endpointMgr.getResolvedActiveEndpointUrl();
+    const session = this.sessionMgr.createSession(
+      this.endpointMgr.getEndpointModels(defaultEndpointUrl),
+    );
+    session.selectedEndpoint = defaultEndpointUrl;
     bindPanelToSession(
       this.panelSessions,
       panel,
@@ -1389,7 +1420,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     );
     if (!fallbackId) return;
 
-    if (this.syncSessionEndpointSelections()) {
+    if (this.normalizeSessionEndpointSelections()) {
       void this.sessionMgr.saveState();
     }
 
@@ -1453,18 +1484,54 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
   ) {
     const includeReportedUsage =
-      this.endpointMgr.getActiveEndpointCapabilities().usesReportedUsageForContext;
+      this.getSessionEndpointCapabilities(session)
+        .usesReportedUsageForContext;
     return estimateSessionTokens(
       session,
       this.config,
       this.projectInstructionsCache,
-      (this.endpointMgr.getActiveEndpointConfig().systemPrompt ?? "").trim(),
+      (this.getSessionEndpointConfig(session).systemPrompt ?? "").trim(),
       { includeReportedUsage },
     );
   }
 
-  private async refreshModels() {
+  private getSessionEndpointUrl(
+    session: Pick<import("./types").ChatSession, "selectedEndpoint">,
+  ) {
+    return this.endpointMgr.getResolvedEndpointUrl(session.selectedEndpoint);
+  }
+
+  private getSessionEndpointConfig(
+    session: Pick<import("./types").ChatSession, "selectedEndpoint">,
+  ) {
+    return this.endpointMgr.getEndpointConfig(this.getSessionEndpointUrl(session));
+  }
+
+  private getSessionEndpointCapabilities(
+    session: Pick<import("./types").ChatSession, "selectedEndpoint">,
+  ) {
+    return this.endpointMgr.getEndpointCapabilities(
+      this.getSessionEndpointUrl(session),
+    );
+  }
+
+  private postMessageToSessionWebviews(
+    sessionId: string,
+    message: ExtensionToWebviewMessage,
+  ) {
+    if (this.view && this.sessionMgr.sidebarSessionId === sessionId) {
+      this.view.webview.postMessage(message);
+    }
+    for (const [panel, boundSessionId] of this.panelSessions.entries()) {
+      if (boundSessionId === sessionId) {
+        panel.webview.postMessage(message);
+      }
+    }
+  }
+
+  private async refreshModels(endpointUrl?: string) {
     await this.endpointMgr.refreshModels(
+      endpointUrl,
       this.sessionMgr.sessions,
       () => this.sessionMgr.saveState(),
       (models) => this.sessionMgr.getPreferredModel(models),
@@ -1493,18 +1560,19 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     const session = this.sessionMgr.requireSession(sessionId);
     if (!session) return;
     syncHarnessPendingState(session);
-    const activeEndpointUrl = this.endpointMgr.getResolvedActiveEndpointUrl();
+    const selectedEndpointUrl = this.getSessionEndpointUrl(session);
+    const availableModels = this.endpointMgr.getEndpointModels(selectedEndpointUrl);
     const endpointCapabilities = this.endpointMgr.getEndpointCapabilities(
-      activeEndpointUrl,
+      selectedEndpointUrl,
     );
     const codexState = endpointCapabilities.kind === "codex-bridge"
       ? this.codexBridgeMgr.getState(this.endpointMgr)
       : undefined;
     const modelControls = buildProviderChatControlsState({
-      endpointUrl: activeEndpointUrl,
+      endpointUrl: selectedEndpointUrl,
       structuredToolsEnabled:
         this.config.get<boolean>("useStructuredTools", true),
-      availableModels: this.endpointMgr.models,
+      availableModels,
       session,
       codexState,
     });
@@ -1515,6 +1583,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     const runtimeHealth = buildHarnessRuntimeHealth({
       session,
       endpointMgr: this.endpointMgr,
+      endpointUrl: selectedEndpointUrl,
+      availableModels,
       estimatedTokens: contextTokenEstimate,
       contextWindowSize,
     });
@@ -1528,7 +1598,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       showReasoningControl: modelControls.showReasoningControl,
       reasoningOptions: modelControls.reasoningOptions,
       endpoints: Array.from(this.endpointMgr.endpointHealthMap.values()),
-      selectedEndpoint: activeEndpointUrl,
+      selectedEndpoint: selectedEndpointUrl,
       status: session.status,
       busy: session.busy,
       sessions: this.sessionMgr.getSessionSummaries(),
@@ -1536,9 +1606,9 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       activeSessionTitle: session.title,
       mode: session.mode,
       diagnostics: buildDiagnostics(
-        this.endpointMgr.baseUrl || LOCAL_POCKETAI_URL,
-        this.endpointMgr.statusSummary,
-        this.endpointMgr.models,
+        selectedEndpointUrl || LOCAL_POCKETAI_URL,
+        this.endpointMgr.getEndpointStatusSummary(selectedEndpointUrl),
+        availableModels,
       ),
       projectInstructionsLoaded: !!this.projectInstructionsCache,
       contextTokenEstimate,
@@ -1554,12 +1624,6 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       harnessState: session.harnessState,
       runtimeHealth,
     } satisfies ExtensionToWebviewMessage);
-  }
-
-  private broadcastToWebviews(message: ExtensionToWebviewMessage) {
-    for (const webview of this.webviews) {
-      webview.postMessage(message);
-    }
   }
 
   /* ── Chat webview initialization ── */
@@ -1578,8 +1642,20 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
         this.handleToolApproval(sid, tcId, approved),
       handleBatchToolApproval: (sid, approved) =>
         this.handleBatchToolApproval(sid, approved),
-      refreshModels: () => this.refreshModels(),
-      selectEndpoint: (endpointUrl) => this.handleEndpointSelection(endpointUrl),
+      refreshModels: (sessionId) => {
+        const session = sessionId
+          ? this.sessionMgr.requireSession(sessionId)
+          : undefined;
+        return this.refreshModels(session?.selectedEndpoint);
+      },
+      selectEndpoint: (sessionId, endpointUrl) =>
+        this.handleEndpointSelection(sessionId, endpointUrl),
+      supportsReasoningEffort: (sessionId) => {
+        const session = this.sessionMgr.requireSession(sessionId);
+        return session
+          ? this.getSessionEndpointCapabilities(session).supportsReasoningEffort
+          : false;
+      },
       postState: () => this.postState(),
       postStateToWebview: (wv, sid) => this.postStateToWebview(wv, sid),
       openForkedPanel: (f) => this.openForkedPanel(f),

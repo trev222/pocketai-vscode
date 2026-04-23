@@ -39,10 +39,10 @@ export interface SlashCommandDeps {
   memoryMgr?: MemoryManager;
   config: vscode.WorkspaceConfiguration;
   outputChannel: vscode.OutputChannel;
-  getStreamingDeps: () => StreamingDeps;
+  getStreamingDeps: (session: ChatSession) => StreamingDeps;
   estimateTokens: (session: ChatSession) => number;
-  refreshModels: () => Promise<void>;
-  selectEndpoint: (endpointUrl: string) => Promise<void>;
+  refreshModels: (endpointUrl?: string) => Promise<void>;
+  selectEndpoint: (sessionId: string, endpointUrl: string) => Promise<void>;
   postState: () => void;
   updateStatusBar: () => void;
   openForkedPanel: (forked: ReturnType<SessionManager["forkSession"]>) => void;
@@ -102,7 +102,9 @@ export async function handleSlashCommand(
       applyModelSlashCommand({
         session,
         arg,
-        availableModels: deps.endpointMgr.models,
+        availableModels: deps.endpointMgr.getEndpointModels(
+          session.selectedEndpoint,
+        ),
         setSessionModel: (modelId) => deps.sessionMgr.setSessionModel(session, modelId),
       });
       deps.sessionMgr.touchSession(session);
@@ -116,10 +118,12 @@ export async function handleSlashCommand(
         const endpointOutcome = resolveEndpointSlashCommand({
           arg,
           endpoints: Array.from(deps.endpointMgr.endpointHealthMap.values()),
-          activeUrl: deps.endpointMgr.activeEndpointUrl,
+          activeUrl: deps.endpointMgr.getResolvedEndpointUrl(
+            session.selectedEndpoint,
+          ),
         });
         if (endpointOutcome.kind === "switch") {
-          await deps.selectEndpoint(endpointOutcome.endpointUrl);
+          await deps.selectEndpoint(session.id, endpointOutcome.endpointUrl);
           session.transcript.push(endpointOutcome.transcriptEntry);
           session.status = endpointOutcome.status;
         } else if (endpointOutcome.kind === "list") {
@@ -176,7 +180,7 @@ export async function handleSlashCommand(
     case "/compact":
       await deps.sessionMgr.compactSession(
         session,
-        deps.getStreamingDeps(),
+        deps.getStreamingDeps(session),
         (s) => deps.estimateTokens(s),
         () => deps.postState(),
       );
@@ -242,10 +246,11 @@ export async function handleSlashCommand(
     }
 
     case "/refresh": {
-      await deps.refreshModels();
+      await deps.refreshModels(session.selectedEndpoint);
+      const endpoint = deps.endpointMgr.getEndpointConfig(session.selectedEndpoint);
       session.status = buildRefreshSlashStatus(
-        deps.endpointMgr.getActiveEndpointConfig().name,
-        deps.endpointMgr.models.length,
+        endpoint.name,
+        deps.endpointMgr.getEndpointModels(session.selectedEndpoint).length,
       );
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
@@ -339,11 +344,15 @@ export async function handleSlashCommand(
     case "/doctor":
     case "/status": {
       syncHarnessPendingState(session);
-      const endpoint = deps.endpointMgr.getActiveEndpointConfig();
-      const capabilities = deps.endpointMgr.getActiveEndpointCapabilities();
-      const health = deps.endpointMgr.endpointHealthMap.get(
-        deps.endpointMgr.activeEndpointUrl,
+      const endpointUrl = deps.endpointMgr.getResolvedEndpointUrl(
+        session.selectedEndpoint,
       );
+      const endpoint = deps.endpointMgr.getEndpointConfig(endpointUrl);
+      const capabilities = deps.endpointMgr.getEndpointCapabilities(endpointUrl);
+      const health = deps.endpointMgr.endpointHealthMap.get(
+        endpointUrl,
+      );
+      const availableModels = deps.endpointMgr.getEndpointModels(endpointUrl);
       const todoItems = session.harnessState.todoItems || [];
       const pendingApprovals = session.harnessState.pendingApprovals || [];
       const backgroundTasks = session.harnessState.backgroundTasks || [];
@@ -353,6 +362,8 @@ export async function handleSlashCommand(
       const runtimeHealth = buildHarnessRuntimeHealth({
         session,
         endpointMgr: deps.endpointMgr,
+        endpointUrl,
+        availableModels,
         estimatedTokens,
         contextWindowSize,
       });
@@ -361,7 +372,7 @@ export async function handleSlashCommand(
         role: "tool",
         content: buildDoctorReport({
           endpointName: endpoint.name || "Unknown",
-          endpointUrl: endpoint.url || deps.endpointMgr.baseUrl,
+          endpointUrl: endpoint.url || endpointUrl,
           providerKind: capabilities.kind,
           healthy: !!health?.healthy,
           selectedModel: session.selectedModel,
