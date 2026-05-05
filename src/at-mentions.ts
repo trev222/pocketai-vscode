@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { DEFAULT_CURRENT_FILE_CHAR_LIMIT, EXCLUDED_DIRS_GLOB } from "./constants";
+import { isInsidePath } from "./helpers";
 
 let workspaceFileCache: string[] = [];
 let workspaceFileCacheTime = 0;
@@ -79,7 +80,7 @@ export async function injectAtMentionContent(
 
   for (const mention of mentions) {
     const fullPath = path.resolve(rootPath, mention.filePath);
-    if (!fullPath.startsWith(rootPath)) continue;
+    if (!isInsidePath(rootPath, fullPath)) continue;
 
     try {
       const stat = fs.statSync(fullPath);

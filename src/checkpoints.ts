@@ -2,16 +2,18 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import type { ChatSession } from "./types";
+import { isInsidePath } from "./helpers";
+import { getSessionWorkspaceRoot } from "./workspace-roots";
 
 export function createCheckpoint(session: ChatSession, filePaths: string[]) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders?.length) return;
-  const rootPath = workspaceFolders[0].uri.fsPath;
+  const rootPath = getSessionWorkspaceRoot(session) || workspaceFolders[0].uri.fsPath;
 
   const files = new Map<string, string>();
   for (const fp of filePaths) {
     const fullPath = path.resolve(rootPath, fp);
-    if (!fullPath.startsWith(rootPath)) continue;
+    if (!isInsidePath(rootPath, fullPath)) continue;
     try {
       files.set(fp, fs.readFileSync(fullPath, "utf-8"));
     } catch {}
@@ -42,12 +44,12 @@ export async function rewindToCheckpoint(
   }
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
-  const rootPath = workspaceFolders?.[0]?.uri.fsPath;
+  const rootPath = getSessionWorkspaceRoot(session) || workspaceFolders?.[0]?.uri.fsPath;
 
   if (restoreCode && rootPath) {
     for (const [fp, content] of checkpoint.files) {
       const fullPath = path.resolve(rootPath, fp);
-      if (!fullPath.startsWith(rootPath)) continue;
+      if (!isInsidePath(rootPath, fullPath)) continue;
       try {
         fs.writeFileSync(fullPath, content, "utf-8");
       } catch (e) {

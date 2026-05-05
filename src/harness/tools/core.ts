@@ -4,7 +4,8 @@ import * as path from "path";
 import * as vscode from "vscode";
 import { createCheckpoint } from "../../checkpoints";
 import { EXCLUDED_DIRS, EXCLUDED_DIRS_GLOB } from "../../constants";
-import { formatFileSize } from "../../helpers";
+import { formatFileSize, isInsidePath } from "../../helpers";
+import { getSessionWorkspaceRoot } from "../../workspace-roots";
 import { runHooks } from "../../hooks";
 import { checkPermissionRules } from "../../permissions";
 import type { ToolLoopDeps } from "../../tool-loop";
@@ -590,7 +591,7 @@ export async function executeGitCommitTool(
       if (modifiedFiles.size > 0) {
         for (const file of modifiedFiles) {
           const absPath = path.resolve(rootPath, file);
-          if (absPath.startsWith(rootPath)) {
+          if (isInsidePath(rootPath, absPath)) {
             child_process.execFileSync("git", ["add", absPath], {
               cwd: rootPath,
               encoding: "utf-8",
@@ -707,11 +708,11 @@ async function withStandardGuards(
   executor: (context: GuardedContext) => Promise<string>,
 ) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders?.length) {
+  const rootPath = getSessionWorkspaceRoot(_session);
+  if (!workspaceFolders?.length || !rootPath) {
     return "Error: No workspace folder open.";
   }
 
-  const rootPath = workspaceFolders[0].uri.fsPath;
   const fullPath = toolCall.filePath
     ? path.resolve(rootPath, toolCall.filePath)
     : rootPath;
@@ -731,7 +732,7 @@ async function withStandardGuards(
     return `Blocked by hook: ${(error as Error).message}`;
   }
 
-  if (toolCall.filePath && !fullPath.startsWith(rootPath)) {
+  if (toolCall.filePath && !isInsidePath(rootPath, fullPath)) {
     return "Error: Path is outside the workspace.";
   }
 

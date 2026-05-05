@@ -2,6 +2,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import type { ChatSession, ToolCall } from "./types";
+import { isInsidePath } from "./helpers";
+import { getSessionWorkspaceRoot } from "./workspace-roots";
 
 export class DiffViewer {
   private diffContentProvider?: vscode.Disposable;
@@ -46,9 +48,9 @@ export class DiffViewer {
 
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders?.length) return;
-    const rootPath = workspaceFolders[0].uri.fsPath;
+    const rootPath = getSessionWorkspaceRoot(session) || workspaceFolders[0].uri.fsPath;
     const fullPath = path.resolve(rootPath, targetTc.filePath);
-    if (!fullPath.startsWith(rootPath)) return;
+    if (!isInsidePath(rootPath, fullPath)) return;
 
     try {
       const original = fs.readFileSync(fullPath, "utf-8");

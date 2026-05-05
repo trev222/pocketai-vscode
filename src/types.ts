@@ -203,6 +203,7 @@ export type ChatSession = {
   selectedModel: string;
   selectedReasoningEffort: string;
   selectedEndpoint: string;
+  worktreeRoot?: string;
   status: string;
   updatedAt: number;
   busy: boolean;

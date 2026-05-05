@@ -1,6 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import type { ToolCall } from "../../types";
+import { isInsidePath } from "../../helpers";
 
 const MAX_DIAGNOSTICS = 100;
 const MAX_LOCATIONS = 25;
@@ -391,7 +392,7 @@ async function resolveWorkspaceDocument(filePath: string): Promise<{
 
   const rootPath = workspaceFolders[0].uri.fsPath;
   const fullPath = path.resolve(rootPath, filePath);
-  if (!fullPath.startsWith(rootPath)) return undefined;
+  if (!isInsidePath(rootPath, fullPath)) return undefined;
 
   try {
     const uri = vscode.Uri.file(fullPath);

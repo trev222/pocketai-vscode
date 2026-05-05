@@ -1,5 +1,6 @@
 import * as os from "os";
 import * as fs from "fs";
+import * as path from "path";
 import * as child_process from "child_process";
 import * as vscode from "vscode";
 import type { ChatSession, ResourceWarning, RuntimeDiagnostics } from "./types";
@@ -10,6 +11,7 @@ import {
   TOOL_USE_INSTRUCTIONS,
   EXCLUDED_DIRS_GLOB,
 } from "./constants";
+import { getSessionWorkspaceRoot } from "./workspace-roots";
 
 /**
  * Rough token estimate: ~4 chars per token for English/code.
@@ -56,6 +58,7 @@ export async function buildWorkspaceContext(
   let usedTokens = 0;
 
   const roots = workspaceFolders.map((f) => f.name);
+  const sessionRootPath = getSessionWorkspaceRoot(session);
 
   const sections: string[] = [];
 
@@ -69,17 +72,31 @@ export async function buildWorkspaceContext(
     usedTokens += estimateTokens(rootsLine);
   }
 
+  if (sessionRootPath && sessionRootPath !== workspaceFolders[0]?.uri.fsPath) {
+    const relWorktree = path.relative(workspaceFolders[0].uri.fsPath, sessionRootPath);
+    const worktreeLine = `Active worktree root for this chat: ${relWorktree || sessionRootPath}`;
+    sections.push(worktreeLine);
+    usedTokens += estimateTokens(worktreeLine);
+  }
+
   // File tree — adaptive: shrink file count when budget is tight
   const adaptiveFileLimit = usedTokens > tokenBudget * 0.5
     ? Math.min(fileLimit, 50)
     : fileLimit;
+  const fileSearchPattern = sessionRootPath
+    ? new vscode.RelativePattern(vscode.Uri.file(sessionRootPath), "**/*")
+    : "**/*";
   const fileUris = await vscode.workspace.findFiles(
-    "**/*",
+    fileSearchPattern,
     EXCLUDED_DIRS_GLOB,
     adaptiveFileLimit,
   );
   const fileList = fileUris
-    .map((uri) => vscode.workspace.asRelativePath(uri, false))
+    .map((uri) =>
+      sessionRootPath
+        ? path.relative(sessionRootPath, uri.fsPath)
+        : vscode.workspace.asRelativePath(uri, false),
+    )
     .filter(Boolean)
     .sort();
 
@@ -157,7 +174,7 @@ export async function buildWorkspaceContext(
 
   // Git branch and status — only if budget allows
   if (config.get<boolean>("includeGitContext", true) && usedTokens < tokenBudget * 0.9) {
-    const rootPath = workspaceFolders[0]?.uri.fsPath;
+    const rootPath = sessionRootPath || workspaceFolders[0]?.uri.fsPath;
     if (rootPath) {
       try {
         const branch = child_process

@@ -39,6 +39,7 @@ export function buildSlashHelpContent(skillLines: string[]): string {
     "- `/sessions` — list saved chat sessions",
     "- `/fork` — fork the current chat into a new one",
     "- `/branch [name]` — inspect or switch git branches",
+    "- `/worktree <name|status|exit>` — isolate this chat in a git worktree",
     "- `/memory [query|clear]` — inspect or clear saved memory",
     "- `/remember <text>` — save a memory",
     "- `/clear` — clear this chat",

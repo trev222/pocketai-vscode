@@ -19,7 +19,8 @@ export type HarnessApprovalDecision =
 
 export type HarnessToolApprovalPolicy =
   | "always-auto"
-  | "mode-auto";
+  | "mode-auto"
+  | "always-ask";
 
 export type HarnessToolPreviewKind =
   | "none"

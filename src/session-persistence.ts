@@ -20,6 +20,7 @@ export function serializeSessionForPersistence(
     selectedModel: session.selectedModel,
     selectedReasoningEffort: session.selectedReasoningEffort,
     selectedEndpoint: session.selectedEndpoint,
+    worktreeRoot: session.worktreeRoot,
     status: session.status,
     updatedAt: session.updatedAt,
     mode: session.mode,
@@ -54,6 +55,7 @@ export function restoreSessionFromPersistence(
       ...session,
       selectedReasoningEffort:
         (session as ChatSession).selectedReasoningEffort ?? "",
+      worktreeRoot: (session as ChatSession).worktreeRoot ?? "",
       busy: false,
       checkpoints: [],
       cumulativeTokens:

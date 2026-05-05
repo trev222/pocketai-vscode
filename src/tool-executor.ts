@@ -9,7 +9,8 @@ import type {
   HarnessBackgroundTask,
   HarnessBackgroundTaskStatus,
 } from "./types";
-import { formatFileSize } from "./helpers";
+import { formatFileSize, isInsidePath } from "./helpers";
+import { getSessionWorkspaceRoot } from "./workspace-roots";
 import { checkPermissionRules } from "./permissions";
 import { runHooks } from "./hooks";
 import { createCheckpoint } from "./checkpoints";
@@ -62,7 +63,10 @@ export async function executeToolCall(
     return "Error: No workspace folder open.";
   }
 
-  const rootPath = workspaceFolders[0].uri.fsPath;
+  const rootPath = getSessionWorkspaceRoot(session);
+  if (!rootPath) {
+    return "Error: No workspace folder open.";
+  }
   const fullPath = toolCall.filePath
     ? path.resolve(rootPath, toolCall.filePath)
     : rootPath;
@@ -85,7 +89,7 @@ export async function executeToolCall(
   }
 
   // Security: ensure the path is within the workspace (for file-based tools)
-  if (toolCall.filePath && !fullPath.startsWith(rootPath)) {
+  if (toolCall.filePath && !isInsidePath(rootPath, fullPath)) {
     return "Error: Path is outside the workspace.";
   }
 
@@ -933,7 +937,7 @@ export async function executeToolCall(
         if (modifiedFiles.size > 0) {
           for (const file of modifiedFiles) {
             const absPath = path.resolve(rootPath, file);
-            if (absPath.startsWith(rootPath)) {
+            if (isInsidePath(rootPath, absPath)) {
               child_process.execFileSync("git", ["add", absPath], {
                 cwd: rootPath,
                 encoding: "utf-8",

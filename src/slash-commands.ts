@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import * as child_process from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 import type { ChatSession, InteractionMode } from "./types";
 import type { SessionManager } from "./session-manager";
 import type { EndpointManager } from "./endpoint-manager";
@@ -19,6 +21,7 @@ import { syncHarnessPendingState } from "./harness/state";
 import {
   buildDoctorReport,
 } from "./slash-command-utils";
+import { getSessionWorkspaceRoot } from "./workspace-roots";
 import {
   applyClearSlashCommand,
   applyExplicitModeSlashCommand,
@@ -32,6 +35,7 @@ import {
   resolveEndpointSlashCommand,
   resolveJobsSlashCommand,
 } from "./slash-command-workflows";
+import { resolveWorktreeSlashCommand } from "./worktree-workflows";
 
 export interface SlashCommandDeps {
   sessionMgr: SessionManager;
@@ -203,7 +207,7 @@ export async function handleSlashCommand(
         deps.postState();
         return true;
       }
-      const rootPath = workspaceFolders[0].uri.fsPath;
+      const rootPath = getSessionWorkspaceRoot(session) || workspaceFolders[0].uri.fsPath;
       try {
         if (!arg) {
           const current = child_process
@@ -219,20 +223,84 @@ export async function handleSlashCommand(
           });
         } else if (arg.startsWith("-d ")) {
           const branchName = arg.slice(3).trim();
-          child_process.execSync(`git branch -d ${branchName}`, { cwd: rootPath, encoding: "utf-8" });
+          child_process.execFileSync("git", ["branch", "-d", branchName], {
+            cwd: rootPath,
+            encoding: "utf-8",
+          });
           session.status = `Deleted branch: ${branchName}`;
         } else {
           try {
-            child_process.execSync(`git checkout -b ${arg}`, { cwd: rootPath, encoding: "utf-8" });
+            child_process.execFileSync("git", ["checkout", "-b", arg], {
+              cwd: rootPath,
+              encoding: "utf-8",
+            });
             session.status = `Created and switched to branch: ${arg}`;
           } catch {
-            child_process.execSync(`git checkout ${arg}`, { cwd: rootPath, encoding: "utf-8" });
+            child_process.execFileSync("git", ["checkout", arg], {
+              cwd: rootPath,
+              encoding: "utf-8",
+            });
             session.status = `Switched to branch: ${arg}`;
           }
         }
       } catch (e) {
         session.status = `Git error: ${(e as Error).message}`;
       }
+      deps.sessionMgr.touchSession(session);
+      await deps.sessionMgr.saveState();
+      deps.postState();
+      return true;
+    }
+
+    case "/worktree": {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders?.length) {
+        session.status = "No workspace folder open.";
+        deps.postState();
+        return true;
+      }
+      const rootPath = workspaceFolders[0].uri.fsPath;
+      const outcome = resolveWorktreeSlashCommand({
+        session,
+        arg,
+        workspaceRoot: rootPath,
+        pathExists: (targetPath) => fs.existsSync(targetPath),
+      });
+
+      if (outcome.kind === "status") {
+        session.transcript.push(outcome.transcriptEntry);
+        session.status = outcome.status;
+      } else if (outcome.kind === "exit") {
+        session.worktreeRoot = "";
+        session.status = outcome.status;
+      } else if (outcome.kind === "error") {
+        session.status = outcome.status;
+      } else {
+        try {
+          if (!outcome.exists) {
+            fs.mkdirSync(path.dirname(outcome.worktreeRoot), { recursive: true });
+            try {
+              child_process.execFileSync(
+                "git",
+                ["worktree", "add", "-b", outcome.branchName, outcome.worktreeRoot],
+                { cwd: rootPath, encoding: "utf-8" },
+              );
+            } catch {
+              child_process.execFileSync(
+                "git",
+                ["worktree", "add", outcome.worktreeRoot, outcome.branchName],
+                { cwd: rootPath, encoding: "utf-8" },
+              );
+            }
+          }
+          session.worktreeRoot = outcome.worktreeRoot;
+          session.transcript.push(outcome.transcriptEntry);
+          session.status = outcome.status;
+        } catch (error) {
+          session.status = `Worktree error: ${(error as Error).message}`;
+        }
+      }
+
       deps.sessionMgr.touchSession(session);
       await deps.sessionMgr.saveState();
       deps.postState();

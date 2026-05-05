@@ -24,6 +24,7 @@ import {
   getFinishedBackgroundTaskIds,
   getInteractionModeStatus,
 } from "./chat-workflows";
+import { isInsidePath } from "./helpers";
 
 export interface MessageHandlerDeps {
   sessionMgr: SessionManager;
@@ -280,7 +281,7 @@ export function setupChatMessageHandler(
           const rootPath = workspaceFolders[0].uri.fsPath;
           const filePath = message.filePath as string;
           const absPath = path.resolve(rootPath, filePath);
-          if (!absPath.startsWith(rootPath)) return;
+          if (!isInsidePath(rootPath, absPath)) return;
           try {
             const doc = await vscode.workspace.openTextDocument(
               vscode.Uri.file(absPath),

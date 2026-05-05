@@ -1,6 +1,7 @@
 import type { ChatSession, ToolCall } from "../types";
 import { MAX_TOOL_TURNS } from "../constants";
 import type { ToolLoopDeps } from "../tool-loop";
+import { getSessionWorkspaceRoot } from "../workspace-roots";
 import { createHarnessEvent, emitHarnessEvent } from "./events";
 import { shouldAutoExecuteTool } from "./policy";
 import { DefaultHarnessModelProvider } from "./provider";
@@ -389,7 +390,10 @@ export class HarnessRunner {
           }),
         );
         if (this.deps.inlineDiffMgr) {
-          void this.deps.inlineDiffMgr.showInlineDiff(toolCall);
+          void this.deps.inlineDiffMgr.showInlineDiff(
+            toolCall,
+            getSessionWorkspaceRoot(session),
+          );
         }
       }
     }

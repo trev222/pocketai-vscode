@@ -33,9 +33,11 @@ const {
 const {
   parseToolCalls,
   stripFabricatedResults,
+  isInsidePath,
 } = require("../dist/helpers.js");
 const {
   classifyToolRisk,
+  classifyShellCommandRisk,
   getToolApprovalDecision,
   shouldAutoExecuteTool,
 } = require("../dist/harness/policy.js");
@@ -136,6 +138,11 @@ const {
   resolveJobsSlashCommand,
 } = require("../dist/slash-command-workflows.js");
 const {
+  getPocketAiWorktreeRoot,
+  normalizeWorktreeName,
+  resolveWorktreeSlashCommand,
+} = require("../dist/worktree-workflows.js");
+const {
   buildBackgroundTaskRestoreSnapshots,
   resolveExistingSessionId,
   shouldPersistStartupState,
@@ -168,6 +175,7 @@ function createSession(overrides = {}) {
     selectedModel: "model-a",
     selectedReasoningEffort: "",
     selectedEndpoint: "http://127.0.0.1:39457",
+    worktreeRoot: "",
     status: "Ready",
     updatedAt: Date.now(),
     busy: false,
@@ -692,10 +700,28 @@ test("policy helpers classify risk and approvals conservatively", () => {
   assert.equal(classifyToolRisk("read_file"), "safe");
   assert.equal(classifyToolRisk("run_command"), "caution");
   assert.equal(classifyToolRisk("git_commit"), "destructive");
+  assert.equal(classifyToolRisk("memory_write"), "caution");
   assert.equal(classifyToolRisk("mcp__foo", true), "external");
 
   const safeRead = { type: "read_file", filePath: "src/a.ts" };
   const commandCall = { type: "run_command", filePath: "", command: "npm test" };
+  const destructiveCommandCall = {
+    type: "run_command",
+    filePath: "",
+    command: "rm -rf dist",
+  };
+  const commitCall = {
+    type: "git_commit",
+    filePath: "",
+    commitMessage: "test",
+  };
+  const memoryWriteCall = {
+    type: "memory_write",
+    filePath: "",
+    memoryType: "project",
+    memoryName: "decision",
+    memoryContent: "Use safe defaults",
+  };
   const codeActionCall = {
     type: "apply_code_action",
     filePath: "src/a.ts",
@@ -706,6 +732,10 @@ test("policy helpers classify risk and approvals conservatively", () => {
 
   assert.equal(getToolApprovalDecision("ask", safeRead), "auto-execute");
   assert.equal(getToolApprovalDecision("ask", commandCall), "requires-approval");
+  assert.equal(classifyShellCommandRisk("npm test"), "safe");
+  assert.equal(classifyShellCommandRisk("npm install left-pad"), "network");
+  assert.equal(classifyShellCommandRisk("rm -rf dist"), "destructive");
+  assert.equal(classifyShellCommandRisk("npm run dev"), "long-running");
   assert.equal(
     getToolApprovalDecision("ask", codeActionCall, { approvalPolicy: "mode-auto" }),
     "requires-approval",
@@ -715,7 +745,65 @@ test("policy helpers classify risk and approvals conservatively", () => {
     "auto-execute",
   );
   assert.equal(shouldAutoExecuteTool("auto", commandCall), true);
+  assert.equal(shouldAutoExecuteTool("auto", destructiveCommandCall), false);
+  assert.equal(
+    shouldAutoExecuteTool("auto", commitCall, { approvalPolicy: "always-ask" }),
+    false,
+  );
+  assert.equal(
+    shouldAutoExecuteTool("auto", memoryWriteCall, { approvalPolicy: "always-ask" }),
+    false,
+  );
   assert.equal(shouldAutoExecuteTool("ask", commandCall), false);
+});
+
+test("isInsidePath rejects sibling paths with shared prefixes", () => {
+  assert.equal(isInsidePath("/tmp/repo", "/tmp/repo/src/index.ts"), true);
+  assert.equal(isInsidePath("/tmp/repo", "/tmp/repo"), true);
+  assert.equal(isInsidePath("/tmp/repo", "/tmp/repo-other/secret.ts"), false);
+  assert.equal(isInsidePath("/tmp/repo", "/tmp/repo/../repo-other/secret.ts"), false);
+});
+
+test("bridge tool shim extracts PocketAI tool envelopes", async () => {
+  const {
+    buildStructuredToolBridgeInstructions,
+    extractStructuredToolCalls,
+    toOpenAiToolCalls,
+  } = await import("../scripts/bridge-tool-shim.mjs");
+
+  const instructions = buildStructuredToolBridgeInstructions([
+    {
+      type: "function",
+      function: {
+        name: "read_file",
+        description: "Read a file.",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    },
+  ]);
+  assert.match(instructions, /PocketAI Structured Tool Bridge/);
+  assert.match(instructions, /read_file/);
+
+  const extracted = extractStructuredToolCalls(`
+Checking first.
+<POCKETAI_TOOL_CALLS>{"tool_calls":[{"name":"read_file","arguments":{"path":"src/index.ts"}}]}</POCKETAI_TOOL_CALLS>
+`);
+  assert.equal(extracted.text, "Checking first.");
+  assert.deepEqual(extracted.toolCalls, [
+    { name: "read_file", arguments: { path: "src/index.ts" } },
+  ]);
+
+  const openAiCalls = toOpenAiToolCalls(extracted.toolCalls, () => "call_test");
+  assert.deepEqual(openAiCalls, [
+    {
+      id: "call_test",
+      type: "function",
+      function: {
+        name: "read_file",
+        arguments: "{\"path\":\"src/index.ts\"}",
+      },
+    },
+  ]);
 });
 
 test("turn policy classifies errors and recovery limits correctly", () => {
@@ -804,7 +892,7 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     getEndpointCapabilities("http://127.0.0.1:39458"),
     {
       kind: "codex-bridge",
-      supportsStructuredTools: false,
+      supportsStructuredTools: true,
       supportsReasoningEffort: true,
       requiresBridgeBootstrap: true,
       usesReportedUsageForContext: false,
@@ -814,7 +902,7 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     getEndpointCapabilities("http://127.0.0.1:39460"),
     {
       kind: "claude-bridge",
-      supportsStructuredTools: false,
+      supportsStructuredTools: true,
       supportsReasoningEffort: false,
       requiresBridgeBootstrap: true,
       usesReportedUsageForContext: false,
@@ -930,6 +1018,7 @@ test("provider capabilities and chat controls honor provider kind and codex reas
 
 test("session persistence strips large payloads and restores interrupted jobs safely", () => {
   const session = createSession({
+    worktreeRoot: "/tmp/project/.pocketai/worktrees/feature-a",
     transcript: [
       {
         role: "user",
@@ -972,11 +1061,13 @@ test("session persistence strips large payloads and restores interrupted jobs sa
   const persisted = serializeSessionForPersistence(session);
   assert.equal(persisted.transcript[0].images[0].data, "");
   assert.equal(persisted.transcript[0].files[0].content, "");
+  assert.equal(persisted.worktreeRoot, "/tmp/project/.pocketai/worktrees/feature-a");
   assert.equal(persisted.backgroundTasks[1].outputPreview.length, 4000);
 
   const restored = restoreSessionFromPersistence(persisted);
   assert.equal(restored.hadRunningBackgroundTasks, true);
   assert.equal(restored.session.busy, false);
+  assert.equal(restored.session.worktreeRoot, "/tmp/project/.pocketai/worktrees/feature-a");
   assert.equal(restored.session.activeSkills.length, 0);
   assert.equal(restored.session.harnessState.backgroundTasks[1].status, "interrupted");
   assert.match(
@@ -1112,6 +1203,44 @@ test("slash command helpers parse jobs subcommands and format core reports", () 
   assert.match(doctorReport, /Suggested next actions:/);
 
   assert.equal(getSessionTitlesStatus(["Chat 1", "Chat 2"]), "Sessions: Chat 1, Chat 2");
+});
+
+test("worktree workflow helpers resolve status, enter, and exit actions", () => {
+  assert.equal(normalizeWorktreeName("enter feature/payment flow"), "feature-payment-flow");
+  assert.equal(
+    getPocketAiWorktreeRoot("/tmp/repo", "feature-a"),
+    "/tmp/repo/.pocketai/worktrees/feature-a",
+  );
+
+  const status = resolveWorktreeSlashCommand({
+    session: createSession(),
+    arg: "",
+    workspaceRoot: "/tmp/repo",
+    pathExists: () => false,
+  });
+  assert.equal(status.kind, "status");
+  assert.match(status.transcriptEntry.content, /No active worktree/);
+
+  const enter = resolveWorktreeSlashCommand({
+    session: createSession(),
+    arg: "feature-a",
+    workspaceRoot: "/tmp/repo",
+    pathExists: () => false,
+  });
+  assert.equal(enter.kind, "enter");
+  assert.equal(enter.name, "feature-a");
+  assert.equal(enter.branchName, "pocketai/feature-a");
+  assert.equal(enter.worktreeRoot, "/tmp/repo/.pocketai/worktrees/feature-a");
+  assert.equal(enter.exists, false);
+
+  const exit = resolveWorktreeSlashCommand({
+    session: createSession({ worktreeRoot: "/tmp/repo/.pocketai/worktrees/feature-a" }),
+    arg: "exit",
+    workspaceRoot: "/tmp/repo",
+    pathExists: () => true,
+  });
+  assert.equal(exit.kind, "exit");
+  assert.match(exit.status, /Exited worktree mode/);
 });
 
 test("session workflow helpers normalize titles and auto-title only default chats", () => {

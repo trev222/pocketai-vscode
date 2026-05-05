@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import type { ToolCall } from "./types";
+import { isInsidePath } from "./helpers";
 
 /**
  * Manages inline diff decorations and CodeLens for pending edit_file tool calls.
@@ -78,15 +79,15 @@ export class InlineDiffManager {
    * Show inline diff decorations for a pending edit_file tool call.
    * Opens the file, highlights the affected region, and adds CodeLens.
    */
-  async showInlineDiff(tc: ToolCall): Promise<void> {
+  async showInlineDiff(tc: ToolCall, rootOverride?: string): Promise<void> {
     if (tc.type !== "edit_file" || !tc.search) return;
 
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders?.length) return;
 
-    const rootPath = workspaceFolders[0].uri.fsPath;
+    const rootPath = rootOverride || workspaceFolders[0].uri.fsPath;
     const fullPath = path.resolve(rootPath, tc.filePath);
-    if (!fullPath.startsWith(rootPath)) return;
+    if (!isInsidePath(rootPath, fullPath)) return;
 
     try {
       // Open the file first so we read the in-editor buffer (may have unsaved changes)

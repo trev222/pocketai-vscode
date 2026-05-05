@@ -44,9 +44,7 @@ export function getEndpointCapabilities(
   return {
     kind,
     supportsStructuredTools:
-      structuredToolsEnabled &&
-      kind !== "codex-bridge" &&
-      kind !== "claude-bridge",
+      structuredToolsEnabled,
     supportsReasoningEffort: kind === "codex-bridge",
     requiresBridgeBootstrap:
       kind === "codex-bridge" || kind === "claude-bridge",

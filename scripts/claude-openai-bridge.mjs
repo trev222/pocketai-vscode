@@ -4,6 +4,11 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import process from "node:process";
+import {
+  buildStructuredToolBridgeInstructions,
+  extractStructuredToolCalls,
+  toOpenAiToolCalls,
+} from "./bridge-tool-shim.mjs";
 
 const HOST = process.env.CLAUDE_BRIDGE_HOST || "127.0.0.1";
 const PORT = Number.parseInt(process.env.CLAUDE_BRIDGE_PORT || "39460", 10);
@@ -140,8 +145,12 @@ function contentToText(content) {
   return normalizeText(parts.join("\n"));
 }
 
-function buildClaudePrompt(messages) {
+function buildClaudePrompt(messages, tools) {
   const systemSections = [BRIDGE_SYSTEM_INSTRUCTIONS];
+  const toolBridgeInstructions = buildStructuredToolBridgeInstructions(tools);
+  if (toolBridgeInstructions) {
+    systemSections.push(toolBridgeInstructions);
+  }
   const conversation = [];
 
   for (const message of Array.isArray(messages) ? messages : []) {
@@ -325,6 +334,7 @@ async function handleStatus(res) {
 async function handleChatCompletions(req, res) {
   const body = await readRequestBody(req);
   const messages = Array.isArray(body.messages) ? body.messages : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
 
   if (!messages.length) {
     sendOpenAiError(
@@ -336,7 +346,7 @@ async function handleChatCompletions(req, res) {
     return;
   }
 
-  const { prompt, systemPrompt } = buildClaudePrompt(messages);
+  const { prompt, systemPrompt } = buildClaudePrompt(messages, tools);
   const model =
     typeof body.model === "string" && body.model.trim()
       ? body.model.trim()
@@ -350,6 +360,11 @@ async function handleChatCompletions(req, res) {
     model,
   });
   const responseModel = result.model || model;
+  const extracted = extractStructuredToolCalls(result.text);
+  const openAiToolCalls = toOpenAiToolCalls(
+    extracted.toolCalls,
+    () => `call_${randomUUID().replace(/-/g, "")}`,
+  );
 
   if (stream) {
     res.writeHead(
@@ -360,7 +375,7 @@ async function handleChatCompletions(req, res) {
         Connection: "keep-alive",
       }),
     );
-    if (result.text) {
+    if (openAiToolCalls.length) {
       writeSse(res, {
         id: responseId,
         object: "chat.completion.chunk",
@@ -369,7 +384,21 @@ async function handleChatCompletions(req, res) {
         choices: [
           {
             index: 0,
-            delta: { content: result.text },
+            delta: { tool_calls: openAiToolCalls.map((toolCall, index) => ({ index, ...toolCall })) },
+            finish_reason: null,
+          },
+        ],
+      });
+    } else if (extracted.text) {
+      writeSse(res, {
+        id: responseId,
+        object: "chat.completion.chunk",
+        created,
+        model: responseModel,
+        choices: [
+          {
+            index: 0,
+            delta: { content: extracted.text },
             finish_reason: null,
           },
         ],
@@ -384,7 +413,7 @@ async function handleChatCompletions(req, res) {
         {
           index: 0,
           delta: {},
-          finish_reason: "stop",
+          finish_reason: openAiToolCalls.length ? "tool_calls" : "stop",
         },
       ],
       ...(result.usage ? { usage: result.usage } : {}),
@@ -404,9 +433,10 @@ async function handleChatCompletions(req, res) {
         index: 0,
         message: {
           role: "assistant",
-          content: result.text,
+          content: extracted.text,
+          ...(openAiToolCalls.length ? { tool_calls: openAiToolCalls } : {}),
         },
-        finish_reason: "stop",
+        finish_reason: openAiToolCalls.length ? "tool_calls" : "stop",
       },
     ],
     ...(result.usage ? { usage: result.usage } : {}),

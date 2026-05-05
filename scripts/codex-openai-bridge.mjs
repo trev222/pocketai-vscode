@@ -5,6 +5,11 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import process from "node:process";
 import readline from "node:readline";
+import {
+  buildStructuredToolBridgeInstructions,
+  extractStructuredToolCalls,
+  toOpenAiToolCalls,
+} from "./bridge-tool-shim.mjs";
 
 const HOST = process.env.CODEX_BRIDGE_HOST || "127.0.0.1";
 const PORT = Number.parseInt(process.env.CODEX_BRIDGE_PORT || "39458", 10);
@@ -127,8 +132,12 @@ function contentToTextAndImages(content) {
   };
 }
 
-function buildCodexPrompt(messages) {
+function buildCodexPrompt(messages, tools) {
   const systemInstructions = [];
+  const toolBridgeInstructions = buildStructuredToolBridgeInstructions(tools);
+  if (toolBridgeInstructions) {
+    systemInstructions.push(toolBridgeInstructions);
+  }
   const conversation = [];
   let lastUserImages = [];
 
@@ -460,13 +469,14 @@ async function handleStatus(res) {
 async function handleChatCompletions(req, res) {
   const body = await readRequestBody(req);
   const messages = Array.isArray(body.messages) ? body.messages : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
 
   if (!messages.length) {
     sendOpenAiError(res, 400, "`messages` must be a non-empty array.", "invalid_request_error");
     return;
   }
 
-  const { baseInstructions, input } = buildCodexPrompt(messages);
+  const { baseInstructions, input } = buildCodexPrompt(messages, tools);
   const model = typeof body.model === "string" && body.model.trim()
     ? body.model.trim()
     : DEFAULT_MODEL || null;
@@ -487,8 +497,12 @@ async function handleChatCompletions(req, res) {
     let resolved = false;
     let responseModel = model || "";
     const pendingSsePayloads = [];
+    const bridgeStructuredMode = tools.length > 0;
 
     const emitChunk = (content) => {
+      if (bridgeStructuredMode) {
+        return;
+      }
       const payload = {
         id: responseId,
         object: "chat.completion.chunk",
@@ -624,8 +638,42 @@ async function handleChatCompletions(req, res) {
     }
 
     const result = await completionPromise;
+    const extracted = extractStructuredToolCalls(result.text);
+    const openAiToolCalls = toOpenAiToolCalls(
+      extracted.toolCalls,
+      () => `call_${randomUUID().replace(/-/g, "")}`,
+    );
 
     if (stream) {
+      if (openAiToolCalls.length) {
+        writeSse(res, {
+          id: responseId,
+          object: "chat.completion.chunk",
+          created,
+          model: responseModel,
+          choices: [
+            {
+              index: 0,
+              delta: { tool_calls: openAiToolCalls.map((toolCall, index) => ({ index, ...toolCall })) },
+              finish_reason: null,
+            },
+          ],
+        });
+      } else if (bridgeStructuredMode && extracted.text) {
+        writeSse(res, {
+          id: responseId,
+          object: "chat.completion.chunk",
+          created,
+          model: responseModel,
+          choices: [
+            {
+              index: 0,
+              delta: { content: extracted.text },
+              finish_reason: null,
+            },
+          ],
+        });
+      }
       writeSse(res, {
         id: responseId,
         object: "chat.completion.chunk",
@@ -635,7 +683,7 @@ async function handleChatCompletions(req, res) {
           {
             index: 0,
             delta: {},
-            finish_reason: "stop",
+            finish_reason: openAiToolCalls.length ? "tool_calls" : "stop",
           },
         ],
         ...(result.usage ? { usage: result.usage } : {}),
@@ -655,9 +703,10 @@ async function handleChatCompletions(req, res) {
           index: 0,
           message: {
             role: "assistant",
-            content: result.text,
+            content: extracted.text,
+            ...(openAiToolCalls.length ? { tool_calls: openAiToolCalls } : {}),
           },
-          finish_reason: "stop",
+          finish_reason: openAiToolCalls.length ? "tool_calls" : "stop",
         },
       ],
       ...(result.usage ? { usage: result.usage } : {}),

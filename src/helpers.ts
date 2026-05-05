@@ -1,3 +1,4 @@
+import * as path from "path";
 import type { ToolCall } from "./types";
 import { DEFAULT_SESSION_TITLE } from "./constants";
 
@@ -7,6 +8,11 @@ export function normalizeBaseUrl(value: string): string {
 
 export function shellEscape(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+export function isInsidePath(rootPath: string, targetPath: string): boolean {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 export function matchGlob(pattern: string, value: string): boolean {

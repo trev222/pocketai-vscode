@@ -31,7 +31,7 @@ export const NON_DESTRUCTIVE_TOOL_TYPES: ReadonlySet<ToolCallType> = new Set([
   "go_to_definition", "find_references", "document_symbols",
   "read_file", "web_search", "web_fetch", "list_files", "grep", "glob",
   "git_status", "git_diff", "todo_write",
-  "memory_read", "memory_write", "memory_delete",
+  "memory_read",
 ]);
 
 /* ================================================================== */

@@ -245,13 +245,13 @@ function createBuiltinToolBehaviors(
       executeMemoryReadTool(deps, session, toolCall),
   },
   memory_write: {
-    approvalPolicy: "always-auto",
+    approvalPolicy: "always-ask",
     previewKind: "none",
     execute: async ({ session, toolCall }) =>
       executeMemoryWriteTool(deps, session, toolCall),
   },
   memory_delete: {
-    approvalPolicy: "always-auto",
+    approvalPolicy: "always-ask",
     previewKind: "none",
     execute: async ({ session, toolCall }) =>
       executeMemoryDeleteTool(deps, session, toolCall),
@@ -275,7 +275,7 @@ function createBuiltinToolBehaviors(
       executeRunCommandTool(deps, session, toolCall),
   },
   git_commit: {
-    approvalPolicy: "mode-auto",
+    approvalPolicy: "always-ask",
     previewKind: "none",
     execute: async ({ session, toolCall }) =>
       executeGitCommitTool(deps, session, toolCall),

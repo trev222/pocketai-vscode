@@ -54,7 +54,7 @@ npm run codex-bridge
 Notes:
 
 - `apiKey` is ignored by the bridge. Authentication comes from your local `codex login` session.
-- The current bridge maps text and image prompts only. PocketAI's structured tool-calling UI is not translated to Codex app-server approvals or inline file diffs yet, so Codex-backed sessions work best for chat, planning, debugging, and code explanation.
+- PocketAI remains the executable tool system. The bridge disables Codex-native tools and translates PocketAI tool requests back into PocketAI approvals, inline diffs, and tool execution.
 - PocketAI may still send `temperature`, `top_p`, and `max_tokens`, but Codex app-server does not expose Chat Completions-style tuning controls, so those values are not forwarded 1:1.
 - If you want Codex to use a different workspace root, you can still launch the bridge manually with `CODEX_BRIDGE_CWD=/path/to/project npm run codex-bridge`.
 
@@ -84,7 +84,7 @@ npm run claude-bridge
 Notes:
 
 - `apiKey` is ignored by the bridge. Authentication comes from your local `claude auth login` session.
-- The first bridge version is intentionally text-first. PocketAI tools stay in charge, so Claude-backed sessions work best for chat, planning, debugging, and code explanation.
+- PocketAI remains the executable tool system. The bridge disables Claude-native tools and translates PocketAI tool requests back into PocketAI approvals, inline diffs, and tool execution.
 - The bridge runs Claude in print mode with Claude-native tools disabled and slash commands turned off, so the experience stays consistent with PocketAI's own harness.
 - If you want Claude to use a different workspace root, you can still launch the bridge manually with `CLAUDE_BRIDGE_CWD=/path/to/project npm run claude-bridge`.
 
