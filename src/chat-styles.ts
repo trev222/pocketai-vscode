@@ -1012,6 +1012,11 @@ export function getChatStyles(): string {
       color: var(--accent);
     }
 
+    .harness-badge.partially_applied {
+      background: rgba(215,186,125,0.14);
+      color: var(--warning);
+    }
+
     .harness-badge.running {
       background: rgba(215,186,125,0.14);
       color: var(--warning);
@@ -1053,6 +1058,12 @@ export function getChatStyles(): string {
     }
 
     .harness-badge.cancelled {
+      background: rgba(255,255,255,0.1);
+      color: var(--fg-muted);
+    }
+
+    .harness-badge.rejected,
+    .harness-badge.stale {
       background: rgba(255,255,255,0.1);
       color: var(--fg-muted);
     }

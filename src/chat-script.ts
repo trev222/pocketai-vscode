@@ -1572,11 +1572,24 @@ export function getChatScript(brandIconUri: string): string {
       const pendingApprovals = Array.isArray(harnessState.pendingApprovals)
         ? harnessState.pendingApprovals
         : [];
+      const now = Date.now();
+      const changeSets = (Array.isArray(harnessState.changeSets)
+        ? harnessState.changeSets
+        : []
+      ).filter((changeSet) => {
+        const updatedAt = typeof changeSet.updatedAt === "number" ? changeSet.updatedAt : 0;
+        return (
+          changeSet.status === "pending" ||
+          changeSet.status === "partially_applied" ||
+          changeSet.status === "error" ||
+          changeSet.status === "stale" ||
+          now - updatedAt < 30000
+        );
+      }).slice(0, 3);
       const todoItems = Array.isArray(harnessState.todoItems)
         ? harnessState.todoItems
         : [];
       const runtimeHealth = getRuntimeHealth(payload);
-      const now = Date.now();
       const subagentTasks = (Array.isArray(harnessState.subagentTasks)
         ? harnessState.subagentTasks
         : []
@@ -1601,6 +1614,7 @@ export function getChatScript(brandIconUri: string): string {
 
       if (
         runtimeHealth.level === "ok" &&
+        !changeSets.length &&
         !todoItems.length &&
         !subagentTasks.length &&
         !payload.worktreeRoot &&
@@ -1777,6 +1791,82 @@ export function getChatScript(brandIconUri: string): string {
           card.appendChild(actions);
         }
 
+        harnessPane.appendChild(card);
+      }
+
+      if (changeSets.length) {
+        const card = document.createElement("div");
+        card.className = "harness-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Changes";
+        title.appendChild(label);
+
+        const totalFiles = changeSets.reduce((sum, changeSet) =>
+          sum + (Array.isArray(changeSet.filePaths) ? changeSet.filePaths.length : 0), 0);
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent =
+          changeSets.length === 1
+            ? totalFiles + " file" + (totalFiles === 1 ? "" : "s") + " in this change set."
+            : changeSets.length + " change sets across " + totalFiles + " files.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const activeCount = changeSets.filter((changeSet) =>
+          changeSet.status === "pending" || changeSet.status === "partially_applied").length;
+        const errorCount = changeSets.filter((changeSet) =>
+          changeSet.status === "error" || changeSet.status === "stale").length;
+        const badge = document.createElement("span");
+        badge.className = "harness-badge " + (errorCount ? "error" : activeCount ? "pending" : changeSets[0].status || "completed");
+        badge.textContent = errorCount ? "attention" : activeCount ? activeCount + " pending" : changeSets[0].status || "done";
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const list = document.createElement("div");
+        list.className = "harness-task-list";
+
+        for (const changeSet of changeSets) {
+          const row = document.createElement("div");
+          row.className = "harness-task-row";
+
+          const top = document.createElement("div");
+          top.className = "harness-task-top";
+
+          const filePaths = Array.isArray(changeSet.filePaths) ? changeSet.filePaths : [];
+          const name = document.createElement("div");
+          name.className = "harness-task-command";
+          name.textContent = filePaths.length
+            ? filePaths.slice(0, 3).join(", ") + (filePaths.length > 3 ? " +" + (filePaths.length - 3) : "")
+            : changeSet.id || "change set";
+          name.title = filePaths.join("\\n") || changeSet.id || "change set";
+          top.appendChild(name);
+
+          const changeBadge = document.createElement("span");
+          changeBadge.className = "harness-badge " + (changeSet.status || "pending");
+          changeBadge.textContent = String(changeSet.status || "pending").replace(/_/g, " ");
+          top.appendChild(changeBadge);
+          row.appendChild(top);
+
+          const meta = document.createElement("div");
+          meta.className = "harness-card-meta";
+          const toolCount = Array.isArray(changeSet.toolCallIds) ? changeSet.toolCallIds.length : 0;
+          meta.textContent =
+            filePaths.length + " file" + (filePaths.length === 1 ? "" : "s") +
+            " / " + toolCount + " tool" + (toolCount === 1 ? "" : "s");
+          row.appendChild(meta);
+
+          list.appendChild(row);
+        }
+
+        card.appendChild(list);
         harnessPane.appendChild(card);
       }
 
