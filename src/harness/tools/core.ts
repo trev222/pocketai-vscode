@@ -20,6 +20,7 @@ import {
 } from "../../tool-executor";
 import type { MemoryType } from "../../memory-manager";
 import type { ChatSession, ToolCall } from "../../types";
+import { upsertBackgroundTask } from "../state";
 
 type GuardedContext = {
   rootPath: string;
@@ -438,6 +439,21 @@ export async function executeRunCommandTool(
       return `Command started in background (id: ${taskId}): \`${cmd}\`\nUse run_command with "bg_status ${taskId}" to check status.`;
     }
 
+    const taskId = toolCall.id ? `cmd_${toolCall.id}` : `cmd_${Date.now().toString(36)}`;
+    const startedAt = Date.now();
+    upsertBackgroundTask(session, {
+      id: taskId,
+      command: cmd,
+      kind: "foreground",
+      toolCallId: toolCall.id,
+      status: "running",
+      outputPreview: "",
+      startedAt,
+      updatedAt: startedAt,
+      cwd: rootPath,
+    });
+    deps.postState();
+
     const useTerminal =
       deps.config.get<boolean>("useIntegratedTerminal", true) && deps.terminalMgr;
     if (useTerminal) {
@@ -451,8 +467,28 @@ export async function executeRunCommandTool(
             ? `${terminalOutput.slice(0, 10000)}\n... [truncated]`
             : terminalOutput;
         if (exitCode !== undefined && exitCode !== 0) {
+          finishForegroundCommandTask(session, deps, {
+            taskId,
+            toolCallId: toolCall.id,
+            cmd,
+            rootPath,
+            output,
+            status: "failed",
+            exitCode,
+            startedAt,
+          });
           return `Command failed (exit ${exitCode}): \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
         }
+        finishForegroundCommandTask(session, deps, {
+          taskId,
+          toolCallId: toolCall.id,
+          cmd,
+          rootPath,
+          output,
+          status: "completed",
+          exitCode,
+          startedAt,
+        });
         return `Command: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
       } catch (error) {
         deps.outputChannel.appendLine(
@@ -470,6 +506,16 @@ export async function executeRunCommandTool(
       );
       const output =
         result.length > 10000 ? `${result.slice(0, 10000)}\n... [truncated]` : result;
+      finishForegroundCommandTask(session, deps, {
+        taskId,
+        toolCallId: toolCall.id,
+        cmd,
+        rootPath,
+        output,
+        status: "completed",
+        exitCode: 0,
+        startedAt,
+      });
       return `Command: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
     } catch (error) {
       const err = error as {
@@ -478,9 +524,52 @@ export async function executeRunCommandTool(
         message: string;
       };
       const output = (err.stderr || err.stdout || err.message).slice(0, 10000);
+      const exitMatch = /Exit code (\d+)/i.exec(err.message || "");
+      finishForegroundCommandTask(session, deps, {
+        taskId,
+        toolCallId: toolCall.id,
+        cmd,
+        rootPath,
+        output,
+        status: "failed",
+        exitCode: exitMatch ? Number(exitMatch[1]) : undefined,
+        startedAt,
+      });
       return `Command failed: \`${cmd}\`\n\`\`\`\n${output}\n\`\`\``;
     }
   });
+}
+
+function finishForegroundCommandTask(
+  session: ChatSession,
+  deps: ToolLoopDeps,
+  options: {
+    taskId: string;
+    toolCallId?: string;
+    cmd: string;
+    rootPath: string;
+    output: string;
+    status: "completed" | "failed";
+    exitCode?: number;
+    startedAt: number;
+  },
+) {
+  const completedAt = Date.now();
+  upsertBackgroundTask(session, {
+    id: options.taskId,
+    command: options.cmd,
+    kind: "foreground",
+    toolCallId: options.toolCallId,
+    status: options.status,
+    outputPreview:
+      options.output.length > 2000 ? options.output.slice(-2000) : options.output,
+    exitCode: options.exitCode,
+    startedAt: options.startedAt,
+    completedAt,
+    updatedAt: completedAt,
+    cwd: options.rootPath,
+  });
+  deps.postState();
 }
 
 export async function executeListFilesTool(

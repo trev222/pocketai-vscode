@@ -1947,10 +1947,16 @@ export function getChatScript(brandIconUri: string): string {
 
         const copy = document.createElement("span");
         copy.className = "harness-card-copy";
+        const foregroundCount = backgroundTasks.filter((task) => task.kind === "foreground").length;
+        const backgroundCount = backgroundTasks.length - foregroundCount;
         copy.textContent =
           backgroundTasks.length === 1
-            ? "1 background command is active or recently finished."
-            : backgroundTasks.length + " background commands are active or recently finished.";
+            ? (foregroundCount ? "1 command is tracked." : "1 background command is active or recently finished.")
+            : foregroundCount && backgroundCount
+              ? foregroundCount + " foreground / " + backgroundCount + " background commands are tracked."
+              : foregroundCount
+                ? foregroundCount + " commands are tracked."
+                : backgroundTasks.length + " background commands are active or recently finished.";
         title.appendChild(copy);
         header.appendChild(title);
 
@@ -2011,7 +2017,9 @@ export function getChatScript(brandIconUri: string): string {
 
           const command = document.createElement("div");
           command.className = "harness-task-command";
-          command.textContent = task.command || task.id;
+          command.textContent = task.kind === "foreground"
+            ? "\u25b6 " + (task.command || task.id)
+            : task.command || task.id;
           command.title = task.command || task.id;
           top.appendChild(command);
 

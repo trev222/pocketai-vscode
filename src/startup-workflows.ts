@@ -5,10 +5,23 @@ export function buildBackgroundTaskRestoreSnapshots(
   sessions: Array<Pick<ChatSession, "id" | "harnessState">>,
 ): BackgroundTaskSnapshot[] {
   return sessions.flatMap((session) =>
-    session.harnessState.backgroundTasks.map((task) => ({
-      ...task,
-      sessionId: session.id,
-    })),
+    session.harnessState.backgroundTasks.map((task) => {
+      const snapshot: BackgroundTaskSnapshot = {
+        id: task.id,
+        sessionId: session.id,
+        command: task.command,
+        kind: task.kind,
+        status: task.status,
+        outputPreview: task.outputPreview,
+        updatedAt: task.updatedAt,
+        cwd: task.cwd,
+      };
+      if (task.toolCallId) snapshot.toolCallId = task.toolCallId;
+      if (typeof task.exitCode === "number") snapshot.exitCode = task.exitCode;
+      if (typeof task.startedAt === "number") snapshot.startedAt = task.startedAt;
+      if (typeof task.completedAt === "number") snapshot.completedAt = task.completedAt;
+      return snapshot;
+    }),
   );
 }
 

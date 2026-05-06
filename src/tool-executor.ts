@@ -1080,6 +1080,9 @@ type BackgroundTask = {
   cmd: string;
   cwd: string;
   proc?: child_process.ChildProcess;
+  kind?: "foreground" | "background";
+  startedAt?: number;
+  completedAt?: number;
   status: HarnessBackgroundTaskStatus;
   output: string;
   exitCode?: number;
@@ -1117,10 +1120,13 @@ function toBackgroundTaskSnapshot(task: BackgroundTask): BackgroundTaskSnapshot 
     id: task.id,
     sessionId: task.sessionId,
     command: task.cmd,
+    kind: task.kind ?? "background",
     status: task.status,
     outputPreview:
       task.output.length > 2000 ? task.output.slice(-2000) : task.output,
     exitCode: task.exitCode,
+    startedAt: task.startedAt,
+    completedAt: task.completedAt,
     updatedAt: task.updatedAt,
     cwd: task.cwd,
   };
@@ -1137,9 +1143,12 @@ export function restoreBackgroundTaskSnapshots(
       sessionId: snapshot.sessionId,
       cmd: snapshot.command,
       cwd: snapshot.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "",
+      kind: snapshot.kind ?? "background",
       status,
       output: snapshot.outputPreview || "",
       exitCode: snapshot.exitCode,
+      startedAt: snapshot.startedAt,
+      completedAt: snapshot.completedAt,
       updatedAt: snapshot.updatedAt,
     };
 
@@ -1169,8 +1178,10 @@ function runCommandInBackground(
     sessionId,
     cmd,
     cwd,
+    kind: "background",
     status: "running",
     output: "",
+    startedAt: Date.now(),
     updatedAt: Date.now(),
   };
 
@@ -1201,6 +1212,7 @@ function runCommandInBackground(
   proc.on("close", (code) => {
     if (task.status === "cancelled") {
       task.exitCode = code ?? 130;
+      task.completedAt = Date.now();
       task.updatedAt = Date.now();
       outputChannel.appendLine(`▶ [${taskId}] Cancelled`);
       pruneBackgroundTasks();
@@ -1209,6 +1221,7 @@ function runCommandInBackground(
     }
     task.exitCode = code ?? 1;
     task.status = code === 0 ? "completed" : "failed";
+    task.completedAt = Date.now();
     task.updatedAt = Date.now();
     outputChannel.appendLine(`▶ [${taskId}] Exit code: ${code}`);
     pruneBackgroundTasks();
@@ -1221,6 +1234,7 @@ function runCommandInBackground(
   proc.on("error", (err) => {
     task.status = "failed";
     task.output += `\nError: ${err.message}`;
+    task.completedAt = Date.now();
     task.updatedAt = Date.now();
     emitBackgroundTask(task);
   });

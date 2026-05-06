@@ -28,12 +28,16 @@ export function serializeSessionForPersistence(
     backgroundTasks: session.harnessState.backgroundTasks.map((task) => ({
       id: task.id,
       command: task.command,
+      kind: task.kind,
+      toolCallId: task.toolCallId,
       status: task.status,
       outputPreview:
         task.outputPreview.length > MAX_PERSISTED_TASK_OUTPUT
           ? task.outputPreview.slice(-MAX_PERSISTED_TASK_OUTPUT)
           : task.outputPreview,
       exitCode: task.exitCode,
+      startedAt: task.startedAt,
+      completedAt: task.completedAt,
       updatedAt: task.updatedAt,
       cwd: task.cwd,
     })),
@@ -93,10 +97,16 @@ export function restorePersistedBackgroundTasks(
       return {
         id: String(task.id || "").trim(),
         command: String(task.command || "").trim(),
+        kind: task.kind === "foreground" ? "foreground" : "background",
+        toolCallId: typeof task.toolCallId === "string" ? task.toolCallId : undefined,
         status,
         outputPreview,
         exitCode:
           typeof task.exitCode === "number" ? task.exitCode : undefined,
+        startedAt:
+          typeof task.startedAt === "number" ? task.startedAt : undefined,
+        completedAt:
+          typeof task.completedAt === "number" ? task.completedAt : undefined,
         updatedAt:
           typeof task.updatedAt === "number" ? task.updatedAt : Date.now(),
         cwd: typeof task.cwd === "string" ? task.cwd.trim() : "",

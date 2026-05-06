@@ -130,9 +130,13 @@ export type HarnessBackgroundTaskStatus =
 export type HarnessBackgroundTask = {
   id: string;
   command: string;
+  kind?: "foreground" | "background";
+  toolCallId?: string;
   status: HarnessBackgroundTaskStatus;
   outputPreview: string;
   exitCode?: number;
+  startedAt?: number;
+  completedAt?: number;
   updatedAt: number;
   cwd?: string;
 };

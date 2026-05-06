@@ -1299,8 +1299,8 @@ test("slash command helpers parse jobs subcommands and format core reports", () 
     { id: "bg1", command: "npm test", status: "running" },
     { id: "bg2", command: "npm run build", status: "failed" },
   ]);
-  assert.match(backgroundList, /Background commands:/);
-  assert.match(backgroundList, /`bg1` \[running\] `npm test`/);
+  assert.match(backgroundList, /Command tasks:/);
+  assert.match(backgroundList, /`bg1` \[background, running\] `npm test`/);
   assert.match(backgroundList, /\/jobs clear/);
 
   const doctorReport = buildDoctorReport({
@@ -2107,7 +2107,7 @@ test("slash command workflow helpers handle common command flows and effects", (
 
   const jobsList = resolveJobsSlashCommand("", session.harnessState.backgroundTasks);
   assert.equal(jobsList.kind, "list");
-  assert.match(jobsList.transcriptEntry.content, /Background commands:/);
+  assert.match(jobsList.transcriptEntry.content, /Command tasks:/);
   const jobsClear = resolveJobsSlashCommand("clear", session.harnessState.backgroundTasks);
   assert.deepEqual(jobsClear, {
     kind: "clear",
@@ -2195,9 +2195,9 @@ test("startup workflow helpers compose restored sessions, endpoint normalization
       id: "bg-1",
       sessionId: "session-a",
       command: "npm test",
+      kind: "background",
       status: "interrupted",
       outputPreview: "[Interrupted after PocketAI reload]\nrunning",
-      exitCode: undefined,
       updatedAt: 5,
       cwd: "/tmp/project",
     },

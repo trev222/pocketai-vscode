@@ -84,11 +84,11 @@ export function formatBackgroundTaskList(
   backgroundTasks: HarnessBackgroundTask[],
 ): string {
   return [
-    "Background commands:",
+    "Command tasks:",
     backgroundTasks
       .map(
         (task) =>
-          `- \`${task.id}\` [${task.status}] \`${task.command}\``,
+          `- \`${task.id}\` [${task.kind ?? "background"}, ${task.status}] \`${task.command}\``,
       )
       .join("\n"),
     "",
