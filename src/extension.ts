@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import * as os from "node:os";
+import * as fs from "fs";
+import * as path from "path";
 
 import type {
   ExtensionToWebviewMessage,
@@ -62,6 +64,7 @@ import {
 import { getXAIProviderName, XAI_BASE_URL } from "./xai";
 import { fetchPocketAiRemoteEndpoints } from "./pocketai-remote-devices";
 import { normalizeSessionEndpointSelections } from "./endpoint-workflows";
+import { getSessionWorkspaceRoot } from "./workspace-roots";
 import {
   bindPanelToSession,
   getPanelsBoundToSession,
@@ -103,6 +106,7 @@ import {
   applyErroredToolCallResult,
   applyExecutedToolCallResult,
   applyRejectedToolCallResult,
+  applyStaleToolCallResult,
   findToolCallInTranscript,
   shouldContinueAfterToolResolution,
 } from "./tool-approval-workflows";
@@ -1252,6 +1256,13 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     approved: boolean,
   ) {
     if (approved) {
+      if (this.isPendingEditStale(session, tc)) {
+        markPendingDiffStatus(session, tc.id, "stale");
+        applyStaleToolCallResult(tc, session.transcript);
+        markChangeSetStatusForToolCall(session, tc.id);
+        this.inlineDiffMgr.clearChange(tc.id);
+        return;
+      }
       tc.status = "approved";
       try {
         const result = await this.executeApprovedToolCall(session, tc);
@@ -1270,6 +1281,27 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     clearPendingToolState(session, tc.id);
     applyRejectedToolCallResult(tc, session.transcript);
     markChangeSetStatusForToolCall(session, tc.id);
+  }
+
+  private isPendingEditStale(
+    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
+    tc: import("./types").ToolCall,
+  ): boolean {
+    if (tc.type !== "edit_file" || !tc.search || !tc.filePath) {
+      return false;
+    }
+    const rootPath = getSessionWorkspaceRoot(session);
+    if (!rootPath) return false;
+    const fullPath = path.resolve(rootPath, tc.filePath);
+    try {
+      const openDoc = vscode.workspace.textDocuments.find(
+        (doc) => doc.uri.fsPath === fullPath,
+      );
+      const content = openDoc?.getText() ?? fs.readFileSync(fullPath, "utf-8");
+      return !content.includes(tc.search);
+    } catch {
+      return true;
+    }
   }
 
   private async handleToolApproval(

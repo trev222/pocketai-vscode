@@ -120,6 +120,7 @@ const {
   applyErroredToolCallResult,
   applyExecutedToolCallResult,
   applyRejectedToolCallResult,
+  applyStaleToolCallResult,
   areToolCallsResolved,
   buildToolExecutionErrorMessage,
   findToolCallInTranscript,
@@ -1728,6 +1729,18 @@ test("tool approval workflow helpers resolve transcript entries and status trans
   applyRejectedToolCallResult(rejectedTool, transcript);
   assert.equal(rejectedTool.status, "rejected");
   assert.equal(rejectedTool.result, "Edit rejected by user.");
+
+  const staleTool = {
+    id: "tc-stale",
+    type: "edit_file",
+    filePath: "src/app.ts",
+    status: "pending",
+  };
+  applyStaleToolCallResult(staleTool, transcript);
+  assert.equal(staleTool.status, "error");
+  assert.equal(staleTool.result, "Edit became stale before approval.");
+  assert.match(transcript.at(-1).content, /no longer matches/);
+
   assert.equal(buildToolExecutionErrorMessage("oops"), "Tool execution error.");
   assert.equal(
     areToolCallsResolved([

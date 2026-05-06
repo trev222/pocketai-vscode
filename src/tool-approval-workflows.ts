@@ -2,6 +2,9 @@ import type { ChatEntry, ToolCall } from "./types";
 
 const REJECTED_TOOL_RESULT = "Edit rejected by user.";
 const REJECTED_TOOL_MESSAGE = "User rejected this change.";
+const STALE_TOOL_RESULT = "Edit became stale before approval.";
+const STALE_TOOL_MESSAGE =
+  "This pending edit no longer matches the current file contents. Re-read the file and request a fresh edit.";
 
 export function findToolCallInTranscript(
   transcript: Pick<ChatEntry, "toolCalls">[],
@@ -58,6 +61,18 @@ export function applyRejectedToolCallResult(
   transcript.push({
     role: "tool",
     content: REJECTED_TOOL_MESSAGE,
+  });
+}
+
+export function applyStaleToolCallResult(
+  toolCall: ToolCall,
+  transcript: ChatEntry[],
+) {
+  toolCall.result = STALE_TOOL_RESULT;
+  toolCall.status = "error";
+  transcript.push({
+    role: "tool",
+    content: STALE_TOOL_MESSAGE,
   });
 }
 
