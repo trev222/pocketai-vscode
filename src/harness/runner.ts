@@ -395,6 +395,24 @@ export class HarnessRunner {
     session: ChatSession,
     toolCalls: ToolCall[],
   ) {
+    const pendingChangeTools = toolCalls.filter((toolCall) =>
+      toolCall.status === "pending" &&
+      (toolCall.type === "edit_file" || toolCall.type === "write_file") &&
+      toolCall.filePath,
+    );
+    if (pendingChangeTools.length) {
+      emitHarnessEvent(
+        this.deps.onHarnessEvent,
+        createHarnessEvent(session.id, "change_set_ready", {
+          detail: JSON.stringify({
+            id: `changes:${pendingChangeTools.map((toolCall) => toolCall.id).join("+")}`,
+            toolCallIds: pendingChangeTools.map((toolCall) => toolCall.id),
+            filePaths: Array.from(new Set(pendingChangeTools.map((toolCall) => toolCall.filePath))),
+          }),
+        }),
+      );
+    }
+
     for (const toolCall of toolCalls) {
       if (toolCall.status !== "pending") {
         continue;

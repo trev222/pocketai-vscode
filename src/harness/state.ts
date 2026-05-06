@@ -1,6 +1,8 @@
 import type {
   ChatSession,
   HarnessBackgroundTask,
+  HarnessChangeSet,
+  HarnessChangeSetStatus,
   HarnessPendingApproval,
   HarnessPendingDiff,
   HarnessSubagentTask,
@@ -12,11 +14,13 @@ import type { HarnessEvent } from "./types";
 const MAX_BACKGROUND_TASKS = 20;
 const MAX_SUBAGENT_TASKS = 10;
 const MAX_DIFF_ARTIFACTS = 20;
+const MAX_CHANGE_SETS = 20;
 
 export function createEmptyHarnessSessionState() {
   return {
     pendingApprovals: [],
     pendingDiffs: [],
+    changeSets: [],
     todoItems: [],
     backgroundTasks: [],
     subagentTasks: [],
@@ -31,6 +35,7 @@ export function applyHarnessEventToSession(
     case "turn_started":
       session.harnessState.pendingApprovals = [];
       markPendingDiffsStale(session);
+      markPendingChangeSetsStale(session);
       return;
     case "tool_call_pending_approval":
       if (!event.toolCallId) return;
@@ -40,10 +45,16 @@ export function applyHarnessEventToSession(
         filePath: findToolCall(session, event.toolCallId)?.filePath || "",
       });
       return;
+    case "change_set_ready":
+      if (!event.detail) return;
+      upsertChangeSet(session, parseChangeSetEventDetail(event.detail));
+      return;
     case "diff_ready":
       if (!event.toolCallId || !event.detail) return;
+      const toolCall = findToolCall(session, event.toolCallId);
       upsertPendingDiff(session, {
         id: `diff:${event.toolCallId}`,
+        changeSetId: findChangeSetIdForToolCall(session, event.toolCallId),
         toolCallId: event.toolCallId,
         filePath: event.detail,
         status: "pending",
@@ -95,7 +106,13 @@ export function syncHarnessPendingState(session: ChatSession) {
   }
 
   session.harnessState.pendingApprovals = dedupeByToolCallId(pendingApprovals);
-  session.harnessState.pendingDiffs = dedupeByToolCallId(pendingDiffs);
+  session.harnessState.changeSets = buildPendingChangeSetsFromApprovals(
+    session.harnessState.pendingApprovals,
+  );
+  session.harnessState.pendingDiffs = dedupeByToolCallId(pendingDiffs).map((diff) => ({
+    ...diff,
+    changeSetId: findChangeSetIdForToolCall(session, diff.toolCallId),
+  }));
   session.harnessState.todoItems = extractTodoItems(session);
 }
 
@@ -110,6 +127,7 @@ export function clearPendingToolState(
   if (diff?.status === "pending") {
     markPendingDiffStatus(session, toolCallId, "stale");
   }
+  updateChangeSetStatusForToolCall(session, toolCallId);
 }
 
 export function markPendingDiffStatus(
@@ -123,6 +141,7 @@ export function markPendingDiffStatus(
   if (!diff) return;
   diff.status = status;
   diff.updatedAt = Date.now();
+  updateChangeSetStatusForToolCall(session, toolCallId);
 }
 
 function clearPendingToolApproval(
@@ -180,6 +199,16 @@ function upsertPendingDiff(session: ChatSession, pendingDiff: HarnessPendingDiff
     .slice(0, MAX_DIFF_ARTIFACTS);
 }
 
+function upsertChangeSet(session: ChatSession, changeSet: HarnessChangeSet) {
+  const next = session.harnessState.changeSets.filter(
+    (item) => item.id !== changeSet.id,
+  );
+  next.push(changeSet);
+  session.harnessState.changeSets = next
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_CHANGE_SETS);
+}
+
 function markPendingDiffsStale(session: ChatSession) {
   const now = Date.now();
   for (const diff of session.harnessState.pendingDiffs) {
@@ -188,6 +217,120 @@ function markPendingDiffsStale(session: ChatSession) {
       diff.updatedAt = now;
     }
   }
+}
+
+function markPendingChangeSetsStale(session: ChatSession) {
+  const now = Date.now();
+  for (const changeSet of session.harnessState.changeSets) {
+    if (changeSet.status === "pending" || changeSet.status === "partially_applied") {
+      changeSet.status = "stale";
+      changeSet.updatedAt = now;
+    }
+  }
+}
+
+function findChangeSetIdForToolCall(
+  session: ChatSession,
+  toolCallId: string,
+): string | undefined {
+  return session.harnessState.changeSets.find((changeSet) =>
+    changeSet.toolCallIds.includes(toolCallId),
+  )?.id;
+}
+
+function updateChangeSetStatusForToolCall(
+  session: ChatSession,
+  toolCallId: string,
+) {
+  const changeSet = session.harnessState.changeSets.find((item) =>
+    item.toolCallIds.includes(toolCallId),
+  );
+  if (!changeSet) return;
+
+  const statuses = changeSet.toolCallIds.map((id) =>
+    getChangeToolStatus(session, id),
+  );
+  changeSet.status = resolveChangeSetStatus(statuses);
+  changeSet.updatedAt = Date.now();
+}
+
+export function markChangeSetStatusForToolCall(
+  session: ChatSession,
+  toolCallId: string,
+) {
+  updateChangeSetStatusForToolCall(session, toolCallId);
+}
+
+function resolveChangeSetStatus(
+  statuses: Array<HarnessPendingDiff["status"] | undefined>,
+): HarnessChangeSetStatus {
+  const known = statuses.filter(Boolean) as HarnessPendingDiff["status"][];
+  if (!known.length) return "pending";
+  if (known.some((status) => status === "error")) return "error";
+  if (known.some((status) => status === "stale")) return "stale";
+  if (known.every((status) => status === "applied")) return "applied";
+  if (known.every((status) => status === "rejected")) return "rejected";
+  if (known.some((status) => status === "applied" || status === "rejected")) {
+    return "partially_applied";
+  }
+  return "pending";
+}
+
+function getChangeToolStatus(
+  session: ChatSession,
+  toolCallId: string,
+): HarnessPendingDiff["status"] | undefined {
+  const diff = session.harnessState.pendingDiffs.find(
+    (item) => item.toolCallId === toolCallId,
+  );
+  if (diff) return diff.status;
+
+  const toolCall = findToolCall(session, toolCallId);
+  if (!toolCall) return undefined;
+  if (toolCall.status === "executed") return "applied";
+  if (toolCall.status === "rejected") return "rejected";
+  if (toolCall.status === "error") return "error";
+  if (toolCall.status === "pending" || toolCall.status === "approved") return "pending";
+  return undefined;
+}
+
+function buildPendingChangeSetsFromApprovals(
+  pendingApprovals: HarnessPendingApproval[],
+): HarnessChangeSet[] {
+  const changeApprovals = pendingApprovals.filter((approval) =>
+    isChangeToolType(approval.toolType) && approval.filePath,
+  );
+  if (!changeApprovals.length) return [];
+  const now = Date.now();
+  return [{
+    id: `changes:${changeApprovals.map((approval) => approval.toolCallId).join("+")}`,
+    toolCallIds: changeApprovals.map((approval) => approval.toolCallId),
+    filePaths: Array.from(new Set(changeApprovals.map((approval) => approval.filePath))),
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+  }];
+}
+
+function parseChangeSetEventDetail(detail: string): HarnessChangeSet {
+  const parsed = JSON.parse(detail) as {
+    id: string;
+    toolCallIds: string[];
+    filePaths: string[];
+  };
+  const now = Date.now();
+  return {
+    id: parsed.id,
+    toolCallIds: Array.isArray(parsed.toolCallIds) ? parsed.toolCallIds : [],
+    filePaths: Array.isArray(parsed.filePaths) ? parsed.filePaths : [],
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function isChangeToolType(toolType: string): boolean {
+  return toolType === "edit_file" || toolType === "write_file";
 }
 
 function dedupeByToolCallId<T extends { toolCallId: string }>(items: T[]): T[] {

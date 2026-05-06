@@ -201,8 +201,10 @@ function createSession(overrides = {}) {
     harnessState: {
       pendingApprovals: [],
       pendingDiffs: [],
+      changeSets: [],
       todoItems: [],
       backgroundTasks: [],
+      subagentTasks: [],
     },
     ...overrides,
   };
@@ -534,6 +536,12 @@ test("harness state sync rebuilds pending approvals, diffs, and latest todo list
             filePath: "src/app.ts",
             status: "pending",
           },
+          {
+            id: "write-1",
+            type: "write_file",
+            filePath: "src/new.ts",
+            status: "pending",
+          },
         ],
       },
       {
@@ -571,6 +579,7 @@ test("harness state sync rebuilds pending approvals, diffs, and latest todo list
   assert.deepEqual(session.harnessState.pendingApprovals, [
     { toolCallId: "edit-1", toolType: "edit_file", filePath: "src/app.ts" },
     { toolCallId: "read-1", toolType: "read_file", filePath: "src/app.ts" },
+    { toolCallId: "write-1", toolType: "write_file", filePath: "src/new.ts" },
   ]);
   assert.equal(session.harnessState.pendingDiffs.length, 1);
   assert.equal(session.harnessState.pendingDiffs[0].id, "diff:edit-1");
@@ -580,6 +589,10 @@ test("harness state sync rebuilds pending approvals, diffs, and latest todo list
   assert.equal(session.harnessState.pendingDiffs[0].previewKind, "inline-diff");
   assert.equal(typeof session.harnessState.pendingDiffs[0].createdAt, "number");
   assert.equal(typeof session.harnessState.pendingDiffs[0].updatedAt, "number");
+  assert.equal(session.harnessState.changeSets.length, 1);
+  assert.deepEqual(session.harnessState.changeSets[0].toolCallIds, ["edit-1", "write-1"]);
+  assert.deepEqual(session.harnessState.changeSets[0].filePaths, ["src/app.ts", "src/new.ts"]);
+  assert.equal(session.harnessState.changeSets[0].status, "pending");
   assert.deepEqual(session.harnessState.todoItems, [
     { content: "step one", status: "pending" },
     { content: "step two", status: "in_progress" },
@@ -613,6 +626,15 @@ test("harness events and task upserts keep session state tidy", () => {
     detail: "edit_file",
   });
   applyHarnessEventToSession(session, {
+    type: "change_set_ready",
+    sessionId: session.id,
+    detail: JSON.stringify({
+      id: "changes:edit-2",
+      toolCallIds: ["edit-2"],
+      filePaths: ["src/file.ts"],
+    }),
+  });
+  applyHarnessEventToSession(session, {
     type: "diff_ready",
     sessionId: session.id,
     toolCallId: "edit-2",
@@ -621,10 +643,14 @@ test("harness events and task upserts keep session state tidy", () => {
 
   assert.equal(session.harnessState.pendingApprovals.length, 1);
   assert.equal(session.harnessState.pendingDiffs.length, 1);
+  assert.equal(session.harnessState.pendingDiffs[0].changeSetId, "changes:edit-2");
   assert.equal(session.harnessState.pendingDiffs[0].status, "pending");
+  assert.equal(session.harnessState.changeSets.length, 1);
+  assert.equal(session.harnessState.changeSets[0].status, "pending");
 
   markPendingDiffStatus(session, "edit-2", "applied");
   assert.equal(session.harnessState.pendingDiffs[0].status, "applied");
+  assert.equal(session.harnessState.changeSets[0].status, "applied");
 
   clearPendingToolState(session, "edit-2");
   assert.equal(session.harnessState.pendingApprovals.length, 0);

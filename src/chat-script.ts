@@ -494,6 +494,7 @@ export function getChatScript(brandIconUri: string): string {
       return harnessState || {
         pendingApprovals: [],
         pendingDiffs: [],
+        changeSets: [],
         todoItems: [],
         backgroundTasks: [],
         subagentTasks: [],

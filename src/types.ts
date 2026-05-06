@@ -107,10 +107,28 @@ export type HarnessPendingApproval = {
 
 export type HarnessPendingDiff = {
   id: string;
+  changeSetId?: string;
   toolCallId: string;
   filePath: string;
   status: "pending" | "applied" | "rejected" | "stale" | "error";
   previewKind: "inline-diff";
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type HarnessChangeSetStatus =
+  | "pending"
+  | "partially_applied"
+  | "applied"
+  | "rejected"
+  | "stale"
+  | "error";
+
+export type HarnessChangeSet = {
+  id: string;
+  toolCallIds: string[];
+  filePaths: string[];
+  status: HarnessChangeSetStatus;
   createdAt: number;
   updatedAt: number;
 };
@@ -160,6 +178,7 @@ export type HarnessSubagentTask = {
 export type HarnessSessionState = {
   pendingApprovals: HarnessPendingApproval[];
   pendingDiffs: HarnessPendingDiff[];
+  changeSets: HarnessChangeSet[];
   todoItems: HarnessTodoItem[];
   backgroundTasks: HarnessBackgroundTask[];
   subagentTasks: HarnessSubagentTask[];

@@ -35,6 +35,7 @@ export type HarnessEventType =
   | "tool_call_started"
   | "tool_call_completed"
   | "tool_call_failed"
+  | "change_set_ready"
   | "diff_ready"
   | "background_task_updated"
   | "turn_completed"

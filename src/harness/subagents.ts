@@ -127,6 +127,7 @@ function createSubagentSession(
     harnessState: {
       pendingApprovals: [],
       pendingDiffs: [],
+      changeSets: [],
       todoItems: [],
       backgroundTasks: [],
       subagentTasks: [],

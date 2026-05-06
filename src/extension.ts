@@ -81,6 +81,7 @@ import {
 import {
   applyHarnessEventToSession,
   clearPendingToolState,
+  markChangeSetStatusForToolCall,
   markPendingDiffStatus,
   syncHarnessPendingState,
   upsertBackgroundTask,
@@ -1256,9 +1257,11 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
         const result = await this.executeApprovedToolCall(session, tc);
         applyExecutedToolCallResult(tc, session.transcript, result);
         markPendingDiffStatus(session, tc.id, "applied");
+        markChangeSetStatusForToolCall(session, tc.id);
       } catch (error) {
         applyErroredToolCallResult(tc, session.transcript, error);
         markPendingDiffStatus(session, tc.id, "error");
+        markChangeSetStatusForToolCall(session, tc.id);
       }
       return;
     }
@@ -1266,6 +1269,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     markPendingDiffStatus(session, tc.id, "rejected");
     clearPendingToolState(session, tc.id);
     applyRejectedToolCallResult(tc, session.transcript);
+    markChangeSetStatusForToolCall(session, tc.id);
   }
 
   private async handleToolApproval(
