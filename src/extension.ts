@@ -23,10 +23,12 @@ import { EndpointManager } from "./endpoint-manager";
 import { DiffViewer } from "./diff-viewer";
 import {
   clearReadTracking,
-  restoreBackgroundTaskSnapshots,
-  subscribeToBackgroundTasks,
-  type BackgroundTaskSnapshot,
 } from "./tool-executor";
+import {
+  restoreCommandTaskSnapshots,
+  subscribeToCommandTasks,
+  type CommandTaskSnapshot,
+} from "./harness/commands/runtime";
 import { runToolLoop, type ToolLoopDeps } from "./tool-loop";
 import { type StreamingDeps } from "./streaming";
 import {
@@ -198,7 +200,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.codexBridgeMgr = new CodexBridgeManager(context, this.outputChannel);
     this.claudeBridgeMgr = new ClaudeBridgeManager(context, this.outputChannel);
     context.subscriptions.push(
-      subscribeToBackgroundTasks((task) => this.handleBackgroundTaskUpdate(task)),
+      subscribeToCommandTasks((task) => this.handleBackgroundTaskUpdate(task)),
     );
 
     // Initialize memory manager if workspace is available
@@ -219,7 +221,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     };
 
     const normalizedRestoredTasks = this.sessionMgr.restoreState();
-    restoreBackgroundTaskSnapshots(
+    restoreCommandTaskSnapshots(
       buildBackgroundTaskRestoreSnapshots(
         Array.from(this.sessionMgr.sessions.values()),
       ),
@@ -322,7 +324,7 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
-  private handleBackgroundTaskUpdate(task: BackgroundTaskSnapshot) {
+  private handleBackgroundTaskUpdate(task: CommandTaskSnapshot) {
     const session = this.sessionMgr.requireSession(task.sessionId);
     if (!session) return;
 

@@ -12,10 +12,10 @@ import type { EndpointManager } from "./endpoint-manager";
 import type { DiffViewer } from "./diff-viewer";
 import { clearSessionSkills, removeSessionSkill } from "./harness/skills/active";
 import {
-  cancelBackgroundTask,
-  removeBackgroundTasks,
-  rerunBackgroundTask,
-} from "./tool-executor";
+  cancelCommandTask,
+  removeCommandTasks,
+  rerunCommandTask,
+} from "./harness/commands/runtime";
 import {
   buildClearedBackgroundTasksMessage,
   buildSessionExportFileName,
@@ -343,7 +343,7 @@ export function setupChatMessageHandler(
         case "cancelBackgroundTask": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
-          const result = cancelBackgroundTask(message.taskId);
+          const result = cancelCommandTask(message.taskId);
           session.transcript.push({
             role: "tool",
             content: result,
@@ -358,7 +358,7 @@ export function setupChatMessageHandler(
         case "rerunBackgroundTask": {
           const session = deps.sessionMgr.requireSession(sessionId);
           if (!session) return;
-          const result = rerunBackgroundTask(
+          const result = rerunCommandTask(
             message.taskId,
             deps.outputChannel,
           );
@@ -384,7 +384,7 @@ export function setupChatMessageHandler(
             deps.postState();
             return;
           }
-          removeBackgroundTasks(staleTaskIds);
+          removeCommandTasks(staleTaskIds);
           session.harnessState.backgroundTasks = session.harnessState.backgroundTasks.filter(
             (task) => task.status === "running",
           );

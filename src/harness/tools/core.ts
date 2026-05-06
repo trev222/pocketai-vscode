@@ -11,13 +11,15 @@ import { checkPermissionRules } from "../../permissions";
 import { getToolPermissionArg } from "../../permission-workflows";
 import type { ToolLoopDeps } from "../../tool-loop";
 import {
-  cancelBackgroundTask,
-  checkBackgroundTask,
   hasReadFileInSession,
   markFileReadInSession,
+} from "../../tool-executor";
+import {
+  cancelCommandTask,
+  checkCommandTask,
   runCommandWithStreaming,
   startBackgroundCommand,
-} from "../../tool-executor";
+} from "../commands/runtime";
 import type { MemoryType } from "../../memory-manager";
 import type { ChatSession, ToolCall } from "../../types";
 import { upsertBackgroundTask } from "../state";
@@ -421,10 +423,10 @@ export async function executeRunCommandTool(
     if (!cmd) return "Error: No command provided.";
 
     if (cmd.startsWith("bg_status ")) {
-      return checkBackgroundTask(cmd.slice(10).trim());
+      return checkCommandTask(cmd.slice(10).trim());
     }
     if (cmd.startsWith("bg_cancel ")) {
-      return cancelBackgroundTask(cmd.slice(10).trim());
+      return cancelCommandTask(cmd.slice(10).trim());
     }
 
     const timeoutMs = Math.min(toolCall.timeout || 120000, 600000);

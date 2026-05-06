@@ -1,12 +1,12 @@
-import type { BackgroundTaskSnapshot } from "./tool-executor";
+import type { CommandTaskSnapshot } from "./harness/commands/runtime";
 import type { ChatSession } from "./types";
 
 export function buildBackgroundTaskRestoreSnapshots(
   sessions: Array<Pick<ChatSession, "id" | "harnessState">>,
-): BackgroundTaskSnapshot[] {
+): CommandTaskSnapshot[] {
   return sessions.flatMap((session) =>
     session.harnessState.backgroundTasks.map((task) => {
-      const snapshot: BackgroundTaskSnapshot = {
+      const snapshot: CommandTaskSnapshot = {
         id: task.id,
         sessionId: session.id,
         command: task.command,

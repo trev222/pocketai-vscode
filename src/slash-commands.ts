@@ -8,11 +8,11 @@ import type { EndpointManager } from "./endpoint-manager";
 import type { MemoryManager } from "./memory-manager";
 import type { StreamingDeps } from "./streaming";
 import {
-  cancelBackgroundTask,
-  checkBackgroundTask,
-  removeBackgroundTasks,
-  rerunBackgroundTask,
-} from "./tool-executor";
+  cancelCommandTask,
+  checkCommandTask,
+  removeCommandTasks,
+  rerunCommandTask,
+} from "./harness/commands/runtime";
 import { formatSkillListMessage } from "./harness/skills/intents";
 import { listBuiltinHarnessSkills } from "./harness/skills/builtins";
 import { listHarnessSkills } from "./harness/skills/registry";
@@ -378,7 +378,7 @@ export async function handleSlashCommand(
       }
 
       if (jobsOutcome.kind === "clear") {
-        removeBackgroundTasks(jobsOutcome.staleTaskIds);
+        removeCommandTasks(jobsOutcome.staleTaskIds);
         session.harnessState.backgroundTasks = jobsOutcome.remainingTasks;
         session.transcript.push(jobsOutcome.transcriptEntry);
         session.status = jobsOutcome.status;
@@ -389,7 +389,7 @@ export async function handleSlashCommand(
       }
 
       if (jobsOutcome.kind === "rerun") {
-        const result = rerunBackgroundTask(jobsOutcome.taskId, deps.outputChannel);
+        const result = rerunCommandTask(jobsOutcome.taskId, deps.outputChannel);
         session.transcript.push({
           role: "tool",
           content: result,
@@ -402,7 +402,7 @@ export async function handleSlashCommand(
       }
 
       if (jobsOutcome.kind === "cancel") {
-        const result = cancelBackgroundTask(jobsOutcome.taskId);
+        const result = cancelCommandTask(jobsOutcome.taskId);
         session.transcript.push({
           role: "tool",
           content: result,
@@ -415,7 +415,7 @@ export async function handleSlashCommand(
       }
 
       if (jobsOutcome.kind === "details") {
-        const result = checkBackgroundTask(jobsOutcome.taskId);
+        const result = checkCommandTask(jobsOutcome.taskId);
         session.transcript.push({
           role: "tool",
           content: result,
