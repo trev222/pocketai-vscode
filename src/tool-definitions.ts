@@ -781,9 +781,10 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
     function: {
       name: "task",
       description:
-        "Delegate a focused read-only investigation to a child agent and wait for its report. " +
+        "Delegate focused investigation or narrowly scoped implementation to a child agent and wait for its report. " +
         "Use this when a subtask can be explored independently, such as inspecting a subsystem, comparing files, or finding risks. " +
-        "The child agent can read/search/analyze but cannot edit files, run arbitrary shell commands, commit, or write memory. " +
+        "By default the child agent can read/search/analyze but cannot edit files, run arbitrary shell commands, commit, or write memory. " +
+        "Use write mode only when you can provide explicit allowed_paths ownership for the files/directories it may edit. " +
         "Ask for a concise report with file references and concrete findings.",
       parameters: {
         type: "object",
@@ -797,6 +798,18 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
             type: "string",
             description:
               "Optional short role/name for the child agent, such as reviewer, explorer, or tester.",
+          },
+          mode: {
+            type: "string",
+            enum: ["readonly", "write"],
+            description:
+              "Defaults to readonly. Use write only for implementation subtasks with explicit allowed_paths ownership.",
+          },
+          allowed_paths: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Relative files or directories the child agent owns in write mode. Required for write mode.",
           },
         },
         required: ["prompt"],

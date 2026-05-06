@@ -220,7 +220,7 @@ export function preparePromptForSend(options: {
   providerKind?: EndpointProviderKind;
 }): PromptPreparationResult {
   let trimmed = options.prompt.trim();
-  const transientSystemPrompt = buildTransientSystemPromptForPrompt(
+  let transientSystemPrompt = buildTransientSystemPromptForPrompt(
     trimmed,
     options.providerKind,
   );
@@ -229,7 +229,22 @@ export function preparePromptForSend(options: {
     const parts = trimmed.split(/\s+/);
     const cmd = parts[0].toLowerCase();
     const arg = parts.slice(1).join(" ").trim();
-    const skillDef = getBuiltinHarnessSkillBySlashCommand(cmd);
+    if (cmd === "/review") {
+      trimmed = [
+        "Review the current git diff as a code reviewer.",
+        arg ? `Focus area: ${arg}` : "",
+        "Use git_diff first, then inspect any relevant files before giving findings.",
+        "Prioritize bugs, regressions, security issues, and missing tests.",
+        "Return findings first, ordered by severity, with file references and concise rationale. If there are no issues, say that clearly and mention residual risk.",
+      ].filter(Boolean).join("\n");
+      transientSystemPrompt = buildTransientSystemPromptForPrompt(
+        trimmed,
+        options.providerKind,
+      );
+    }
+    const skillDef = cmd === "/review"
+      ? undefined
+      : getBuiltinHarnessSkillBySlashCommand(cmd);
     if (skillDef) {
       const shortcut = applySlashSkillShortcut(options.session, skillDef, arg);
       if (shortcut.handled) {

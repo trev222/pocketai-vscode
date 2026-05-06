@@ -496,6 +496,7 @@ export function getChatScript(brandIconUri: string): string {
         pendingDiffs: [],
         todoItems: [],
         backgroundTasks: [],
+        subagentTasks: [],
       };
     }
 
@@ -525,7 +526,7 @@ export function getChatScript(brandIconUri: string): string {
       const set = new Set();
       const pendingDiffs = getHarnessState(payload).pendingDiffs || [];
       for (const diff of pendingDiffs) {
-        if (diff && diff.toolCallId) {
+        if (diff && diff.toolCallId && (!diff.status || diff.status === "pending")) {
           set.add(diff.toolCallId);
         }
       }
@@ -1201,6 +1202,68 @@ export function getChatScript(brandIconUri: string): string {
         secondaryRow.appendChild(previewBtn);
       }
 
+      if (currentToolCall) {
+        const rememberAllow = document.createElement("button");
+        rememberAllow.className = "tool-btn";
+        rememberAllow.textContent = "Always Allow";
+        rememberAllow.disabled = !!payload.busy;
+        rememberAllow.title = "Remember an allow rule for this exact tool target.";
+        rememberAllow.onclick = () =>
+          vscode.postMessage({
+            type: "rememberToolPermission",
+            toolCallId: currentApproval.toolCallId,
+            decision: "allow",
+            scope: "exact",
+          });
+        secondaryRow.appendChild(rememberAllow);
+
+        const rememberDeny = document.createElement("button");
+        rememberDeny.className = "tool-btn tool-btn-reject";
+        rememberDeny.textContent = "Always Deny";
+        rememberDeny.disabled = !!payload.busy;
+        rememberDeny.title = "Remember a deny rule for this exact tool target.";
+        rememberDeny.onclick = () =>
+          vscode.postMessage({
+            type: "rememberToolPermission",
+            toolCallId: currentApproval.toolCallId,
+            decision: "deny",
+            scope: "exact",
+          });
+        secondaryRow.appendChild(rememberDeny);
+
+        if (currentToolCall.type === "run_command") {
+          const commandClassBtn = document.createElement("button");
+          commandClassBtn.className = "tool-btn";
+          commandClassBtn.textContent = "Allow Class";
+          commandClassBtn.disabled = !!payload.busy;
+          commandClassBtn.title = "Remember an allow rule for this command risk class.";
+          commandClassBtn.onclick = () =>
+            vscode.postMessage({
+              type: "rememberToolPermission",
+              toolCallId: currentApproval.toolCallId,
+              decision: "allow",
+              scope: "command-risk",
+            });
+          secondaryRow.appendChild(commandClassBtn);
+        }
+
+        if (currentToolCall.filePath) {
+          const pathDenyBtn = document.createElement("button");
+          pathDenyBtn.className = "tool-btn tool-btn-reject";
+          pathDenyBtn.textContent = "Deny Path";
+          pathDenyBtn.disabled = !!payload.busy;
+          pathDenyBtn.title = "Remember a deny rule for this path.";
+          pathDenyBtn.onclick = () =>
+            vscode.postMessage({
+              type: "rememberToolPermission",
+              toolCallId: currentApproval.toolCallId,
+              decision: "deny",
+              scope: "path",
+            });
+          secondaryRow.appendChild(pathDenyBtn);
+        }
+      }
+
       if (queuedCount > 0) {
         const approveAll = document.createElement("button");
         approveAll.className = "tool-btn";
@@ -1513,6 +1576,13 @@ export function getChatScript(brandIconUri: string): string {
         : [];
       const runtimeHealth = getRuntimeHealth(payload);
       const now = Date.now();
+      const subagentTasks = (Array.isArray(harnessState.subagentTasks)
+        ? harnessState.subagentTasks
+        : []
+      ).filter((task) => {
+        const updatedAt = typeof task.updatedAt === "number" ? task.updatedAt : 0;
+        return task.status === "running" || now - updatedAt < 30000;
+      }).slice(0, 4);
       const backgroundTasks = (Array.isArray(harnessState.backgroundTasks)
         ? harnessState.backgroundTasks
         : []
@@ -1531,6 +1601,9 @@ export function getChatScript(brandIconUri: string): string {
       if (
         runtimeHealth.level === "ok" &&
         !todoItems.length &&
+        !subagentTasks.length &&
+        !payload.worktreeRoot &&
+        !payload.permissionSummary &&
         !backgroundTasks.length
       ) {
         harnessPane.style.display = "none";
@@ -1619,6 +1692,167 @@ export function getChatScript(brandIconUri: string): string {
           }
         }
 
+        harnessPane.appendChild(card);
+      }
+
+      if (payload.worktreeRoot || payload.permissionSummary) {
+        const card = document.createElement("div");
+        card.className = "harness-card harness-context-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Session";
+        title.appendChild(label);
+
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent = payload.worktreeRoot
+          ? "Worktree isolation is active."
+          : "Custom permission rules are active.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const badge = document.createElement("span");
+        badge.className = "harness-badge ok";
+        badge.textContent = payload.worktreeRoot ? "worktree" : "permissions";
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const metaLines = [];
+        if (payload.worktreeRoot) {
+          metaLines.push("Worktree: " + payload.worktreeRoot);
+        }
+        if (payload.permissionSummary) {
+          metaLines.push(
+            "Permissions: " +
+            payload.permissionSummary.allowCount +
+            " allow / " +
+            payload.permissionSummary.denyCount +
+            " deny",
+          );
+        }
+        if (metaLines.length) {
+          const meta = document.createElement("div");
+          meta.className = "harness-card-meta harness-card-meta-stack";
+          meta.textContent = metaLines.join("\\n");
+          card.appendChild(meta);
+        }
+
+        const actions = document.createElement("div");
+        actions.className = "harness-card-actions";
+        if (payload.worktreeRoot) {
+          const statusBtn = document.createElement("button");
+          statusBtn.className = "tool-btn";
+          statusBtn.textContent = "Worktree Status";
+          statusBtn.disabled = !!payload.busy;
+          statusBtn.onclick = () =>
+            vscode.postMessage({ type: "sendPrompt", prompt: "/worktree status" });
+          actions.appendChild(statusBtn);
+
+          const exitBtn = document.createElement("button");
+          exitBtn.className = "tool-btn";
+          exitBtn.textContent = "Exit Worktree";
+          exitBtn.disabled = !!payload.busy;
+          exitBtn.onclick = () =>
+            vscode.postMessage({ type: "sendPrompt", prompt: "/worktree exit" });
+          actions.appendChild(exitBtn);
+        }
+        if (payload.permissionSummary) {
+          const permissionsBtn = document.createElement("button");
+          permissionsBtn.className = "tool-btn";
+          permissionsBtn.textContent = "Permissions";
+          permissionsBtn.disabled = !!payload.busy;
+          permissionsBtn.onclick = () =>
+            vscode.postMessage({ type: "sendPrompt", prompt: "/permissions" });
+          actions.appendChild(permissionsBtn);
+        }
+        if (actions.childElementCount) {
+          card.appendChild(actions);
+        }
+
+        harnessPane.appendChild(card);
+      }
+
+      if (subagentTasks.length) {
+        const card = document.createElement("div");
+        card.className = "harness-card";
+
+        const header = document.createElement("div");
+        header.className = "harness-card-header";
+
+        const title = document.createElement("div");
+        title.className = "harness-card-title";
+
+        const label = document.createElement("span");
+        label.className = "harness-card-label";
+        label.textContent = "Subagents";
+        title.appendChild(label);
+
+        const copy = document.createElement("span");
+        copy.className = "harness-card-copy";
+        copy.textContent =
+          subagentTasks.length === 1
+            ? "1 delegated task is visible."
+            : subagentTasks.length + " delegated tasks are visible.";
+        title.appendChild(copy);
+        header.appendChild(title);
+
+        const runningCount = subagentTasks.filter((task) => task.status === "running").length;
+        const failedCount = subagentTasks.filter((task) => task.status === "failed").length;
+        const badge = document.createElement("span");
+        badge.className = "harness-badge " + (runningCount ? "running" : failedCount ? "failed" : "completed");
+        badge.textContent = runningCount ? runningCount + " running" : failedCount ? "attention" : "done";
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const list = document.createElement("div");
+        list.className = "harness-task-list";
+
+        for (const task of subagentTasks) {
+          const row = document.createElement("div");
+          row.className = "harness-task-row";
+
+          const top = document.createElement("div");
+          top.className = "harness-task-top";
+
+          const name = document.createElement("div");
+          name.className = "harness-task-command";
+          name.textContent = task.name || "subagent";
+          name.title = task.prompt || task.name || "subagent";
+          top.appendChild(name);
+
+          const taskBadge = document.createElement("span");
+          taskBadge.className = "harness-badge " + task.status;
+          taskBadge.textContent = task.status + " / " + (task.mode || "readonly");
+          top.appendChild(taskBadge);
+          row.appendChild(top);
+
+          const meta = document.createElement("div");
+          meta.className = "harness-card-meta";
+          meta.textContent = task.allowedPaths && task.allowedPaths.length
+            ? "owns " + task.allowedPaths.join(", ")
+            : "read-only investigation";
+          row.appendChild(meta);
+
+          if (task.resultPreview) {
+            const preview = document.createElement("div");
+            preview.className = "harness-task-preview";
+            preview.textContent = task.resultPreview.length > 220
+              ? task.resultPreview.slice(-220)
+              : task.resultPreview;
+            row.appendChild(preview);
+          }
+
+          list.appendChild(row);
+        }
+
+        card.appendChild(list);
         harnessPane.appendChild(card);
       }
 

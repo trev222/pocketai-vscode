@@ -44,6 +44,12 @@ export interface MessageHandlerDeps {
     toolCallId: string,
     approved: boolean,
   ) => Promise<void>;
+  rememberToolPermission: (
+    sessionId: string,
+    toolCallId: string,
+    decision: "allow" | "deny",
+    scope: "exact" | "command-risk" | "path",
+  ) => Promise<void>;
   handleBatchToolApproval: (
     sessionId: string,
     approved: boolean,
@@ -165,6 +171,15 @@ export function setupChatMessageHandler(
 
         case "rejectToolCall":
           await deps.handleToolApproval(sessionId, message.toolCallId, false);
+          return;
+
+        case "rememberToolPermission":
+          await deps.rememberToolPermission(
+            sessionId,
+            message.toolCallId,
+            message.decision,
+            message.scope,
+          );
           return;
 
         case "approveAllToolCalls":

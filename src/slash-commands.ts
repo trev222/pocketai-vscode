@@ -307,6 +307,32 @@ export async function handleSlashCommand(
       return true;
     }
 
+    case "/permissions": {
+      const permissions = deps.config.get<{ allow?: string[]; deny?: string[] }>("permissions") ?? {};
+      const allowRules = permissions.allow ?? [];
+      const denyRules = permissions.deny ?? [];
+      const lines = [
+        "Active permission rules:",
+        "",
+        `Allow (${allowRules.length}):`,
+        ...(allowRules.length ? allowRules.map((rule) => `- \`${rule}\``) : ["- none"]),
+        "",
+        `Deny (${denyRules.length}):`,
+        ...(denyRules.length ? denyRules.map((rule) => `- \`${rule}\``) : ["- none"]),
+        "",
+        "Workspace file rules from `.pocketai.permissions.json` are also applied at execution time when present.",
+      ];
+      session.transcript.push({
+        role: "tool",
+        content: lines.join("\n"),
+      });
+      session.status = `${allowRules.length} allow / ${denyRules.length} deny permission rules configured.`;
+      deps.sessionMgr.touchSession(session);
+      await deps.sessionMgr.saveState();
+      deps.postState();
+      return true;
+    }
+
     case "/tokens": {
       applyTokensSlashCommand(session);
       deps.postState();

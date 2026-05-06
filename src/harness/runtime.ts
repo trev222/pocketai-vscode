@@ -2,7 +2,10 @@ import type { ChatSession, ToolCall } from "../types";
 import type { ToolLoopDeps } from "../tool-loop";
 import { executeToolCallWithHooks } from "../tool-executor";
 import { createHarnessEvent, emitHarnessEvent } from "./events";
-import { isReadonlySubagentTool } from "./subagent-policy";
+import {
+  isAllowedSubagentPath,
+  isAllowedSubagentTool,
+} from "./subagent-policy";
 import type { HarnessToolRegistry, HarnessToolRuntime } from "./types";
 
 export class DefaultHarnessToolRuntime implements HarnessToolRuntime {
@@ -47,8 +50,17 @@ export class DefaultHarnessToolRuntime implements HarnessToolRuntime {
     session: ChatSession,
     toolCall: ToolCall,
   ): Promise<string> {
-    if (session.subagentReadonly && !isReadonlySubagentTool(toolCall.type)) {
-      return `Subagent blocked ${toolCall.type}: read-only subagents can inspect and report, but cannot mutate state or delegate.`;
+    if (session.subagentDepth) {
+      if (!isAllowedSubagentTool(session, toolCall.type)) {
+        return `Subagent blocked ${toolCall.type}: subagents can only use tools allowed by their mode and ownership scope.`;
+      }
+      if (
+        !session.subagentReadonly &&
+        (toolCall.type === "edit_file" || toolCall.type === "write_file") &&
+        !isAllowedSubagentPath(session.subagentAllowedPaths, toolCall.filePath)
+      ) {
+        return `Subagent blocked ${toolCall.type}: ${toolCall.filePath} is outside this subagent's owned paths.`;
+      }
     }
 
     const descriptor = this.registry.getToolDescriptor(toolCall.type);

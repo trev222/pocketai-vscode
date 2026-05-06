@@ -86,6 +86,8 @@ export type ToolCall = {
   // task/subagent
   subagentName?: string;
   taskPrompt?: string;
+  subagentMode?: "readonly" | "write";
+  subagentAllowedPaths?: string[];
   // memory tools
   memoryType?: string;
   memoryName?: string;
@@ -104,8 +106,13 @@ export type HarnessPendingApproval = {
 };
 
 export type HarnessPendingDiff = {
+  id: string;
   toolCallId: string;
   filePath: string;
+  status: "pending" | "applied" | "rejected" | "stale" | "error";
+  previewKind: "inline-diff";
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type HarnessTodoItem = {
@@ -130,11 +137,28 @@ export type HarnessBackgroundTask = {
   cwd?: string;
 };
 
+export type HarnessSubagentTaskStatus =
+  | "running"
+  | "completed"
+  | "failed";
+
+export type HarnessSubagentTask = {
+  id: string;
+  name: string;
+  prompt: string;
+  mode: "readonly" | "write";
+  status: HarnessSubagentTaskStatus;
+  allowedPaths: string[];
+  resultPreview: string;
+  updatedAt: number;
+};
+
 export type HarnessSessionState = {
   pendingApprovals: HarnessPendingApproval[];
   pendingDiffs: HarnessPendingDiff[];
   todoItems: HarnessTodoItem[];
   backgroundTasks: HarnessBackgroundTask[];
+  subagentTasks: HarnessSubagentTask[];
 };
 
 export type HarnessRuntimeHealth = {
@@ -210,6 +234,7 @@ export type ChatSession = {
   worktreeRoot?: string;
   subagentDepth?: number;
   subagentReadonly?: boolean;
+  subagentAllowedPaths?: string[];
   status: string;
   updatedAt: number;
   busy: boolean;
@@ -310,6 +335,12 @@ export type WebviewToExtensionMessage =
   | { type: "setMode"; mode: InteractionMode }
   | { type: "approveToolCall"; toolCallId: string }
   | { type: "rejectToolCall"; toolCallId: string }
+  | {
+      type: "rememberToolPermission";
+      toolCallId: string;
+      decision: "allow" | "deny";
+      scope: "exact" | "command-risk" | "path";
+    }
   | { type: "cancelRequest" }
   | { type: "exportSession" }
   | { type: "searchSessions"; query: string }
@@ -353,6 +384,8 @@ export type ExtensionToWebviewMessage = {
   activeSkills: Array<Omit<SessionActiveSkill, "prompt">>;
   harnessState: HarnessSessionState;
   runtimeHealth: HarnessRuntimeHealth;
+  worktreeRoot?: string;
+  permissionSummary?: { allowCount: number; denyCount: number };
 } | {
   type: "streamStart";
   label?: string;

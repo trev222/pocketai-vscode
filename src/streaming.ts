@@ -91,7 +91,7 @@ const STRUCTURED_TOOL_INSTRUCTIONS = `You have tools available via function call
 - To inspect type/docs/signature info for a symbol at a position, use hover_symbol.
 - To inspect available quick fixes or refactors at a location, use code_actions.
 - To apply one of those editor actions directly, use apply_code_action with the exact title.
-- To delegate a focused independent investigation, use task with a narrow prompt and expected report shape. Subagents are read-only.
+- To delegate focused independent work, use task with a narrow prompt and expected report shape. Subagents are read-only by default; use write mode only with explicit allowed_paths ownership.
 - To modify a file, use edit_file — never run_command with sed/awk.
 - To create a new file, use write_file — never run_command with echo/cat redirection.
 - Use run_command only for shell operations that have no dedicated tool (builds, installs, test runners, etc.).
@@ -777,6 +777,10 @@ function createToolCallFromFunction(
     case "task":
       tc.taskPrompt = args.prompt;
       tc.subagentName = args.name;
+      tc.subagentMode = args.mode === "write" ? "write" : "readonly";
+      if (Array.isArray(args.allowed_paths)) {
+        tc.subagentAllowedPaths = args.allowed_paths.map((item: unknown) => String(item));
+      }
       break;
     case "memory_read":
       tc.memoryQuery = args.query;

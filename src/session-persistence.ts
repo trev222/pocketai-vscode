@@ -67,6 +67,7 @@ export function restoreSessionFromPersistence(
       harnessState: {
         ...createEmptyHarnessSessionState(),
         backgroundTasks: restorePersistedBackgroundTasks(session.backgroundTasks),
+        subagentTasks: [],
       },
     },
   };

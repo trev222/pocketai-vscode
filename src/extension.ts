@@ -79,6 +79,7 @@ import {
 import {
   applyHarnessEventToSession,
   clearPendingToolState,
+  markPendingDiffStatus,
   syncHarnessPendingState,
   upsertBackgroundTask,
 } from "./harness/state";
@@ -1252,12 +1253,15 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       try {
         const result = await this.executeApprovedToolCall(session, tc);
         applyExecutedToolCallResult(tc, session.transcript, result);
+        markPendingDiffStatus(session, tc.id, "applied");
       } catch (error) {
         applyErroredToolCallResult(tc, session.transcript, error);
+        markPendingDiffStatus(session, tc.id, "error");
       }
       return;
     }
 
+    markPendingDiffStatus(session, tc.id, "rejected");
     clearPendingToolState(session, tc.id);
     applyRejectedToolCallResult(tc, session.transcript);
   }
@@ -1313,6 +1317,77 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     this.postState();
 
     if (!session.busy) {
+      this.continueAfterToolResults(session);
+    }
+  }
+
+  private async rememberToolPermission(
+    sessionId: string,
+    toolCallId: string,
+    decision: "allow" | "deny",
+    scope: "exact" | "command-risk" | "path",
+  ) {
+    const session = this.sessionMgr.requireSession(sessionId);
+    if (!session) return;
+    const resolved = findToolCallInTranscript(session.transcript, toolCallId);
+    if (!resolved) return;
+
+    const { buildRememberedPermissionRule } = await import("./permission-workflows");
+    const { classifyShellCommandRisk } = await import("./harness/policy");
+    const commandRisk = resolved.toolCall.type === "run_command"
+      ? classifyShellCommandRisk(resolved.toolCall.command || "")
+      : undefined;
+    if (
+      decision === "allow" &&
+      scope === "command-risk" &&
+      commandRisk === "destructive"
+    ) {
+      session.status = "Refused to remember an allow rule for destructive command class.";
+      this.postState();
+      return;
+    }
+    const rule = buildRememberedPermissionRule(
+      resolved.toolCall,
+      scope,
+      commandRisk,
+    );
+    const permissions =
+      this.config.get<{ allow?: string[]; deny?: string[] }>("permissions") ?? {};
+    const currentRules = permissions[decision] ?? [];
+    if (!currentRules.includes(rule)) {
+      const nextPermissions = {
+        allow: permissions.allow ?? [],
+        deny: permissions.deny ?? [],
+        [decision]: [...currentRules, rule],
+      };
+      await this.config.update(
+        "permissions",
+        nextPermissions,
+        vscode.ConfigurationTarget.Workspace,
+      );
+    }
+
+    session.status = `Remembered ${decision} rule: ${rule}`;
+    session.transcript.push({
+      role: "tool",
+      content: `Permission rule saved: \`${rule}\` (${decision}).`,
+    });
+    this.inlineDiffMgr.clearChange(toolCallId);
+    await this.applyToolApprovalDecision(
+      session,
+      resolved.toolCall,
+      decision === "allow",
+    );
+    this.sessionMgr.touchSession(session);
+    await this.sessionMgr.saveState();
+    this.postState();
+
+    if (
+      shouldContinueAfterToolResolution(
+        resolved.entry.toolCalls,
+        session.busy,
+      )
+    ) {
       this.continueAfterToolResults(session);
     }
   }
@@ -1588,6 +1663,15 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       estimatedTokens: contextTokenEstimate,
       contextWindowSize,
     });
+    const permissions =
+      this.config.get<{ allow?: string[]; deny?: string[] }>("permissions") ?? {};
+    const permissionSummary =
+      (permissions.allow?.length || permissions.deny?.length)
+        ? {
+            allowCount: permissions.allow?.length ?? 0,
+            denyCount: permissions.deny?.length ?? 0,
+          }
+        : undefined;
     webview.postMessage({
       type: "state",
       transcript: session.transcript,
@@ -1623,6 +1707,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       })),
       harnessState: session.harnessState,
       runtimeHealth,
+      worktreeRoot: session.worktreeRoot || undefined,
+      permissionSummary,
     } satisfies ExtensionToWebviewMessage);
   }
 
@@ -1640,6 +1726,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       handleUseSelection: (sid) => this.handleUseSelection(sid),
       handleToolApproval: (sid, tcId, approved) =>
         this.handleToolApproval(sid, tcId, approved),
+      rememberToolPermission: (sid, tcId, decision, scope) =>
+        this.rememberToolPermission(sid, tcId, decision, scope),
       handleBatchToolApproval: (sid, approved) =>
         this.handleBatchToolApproval(sid, approved),
       refreshModels: (sessionId) => {

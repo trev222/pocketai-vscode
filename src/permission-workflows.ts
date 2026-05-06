@@ -22,6 +22,32 @@ export function getToolPermissionArg(toolCall: ToolCall): string {
   return argByType[toolCall.type] ?? toolCall.filePath;
 }
 
+export type RememberPermissionRuleKind =
+  | "exact"
+  | "command-risk"
+  | "path";
+
+export function buildRememberedPermissionRule(
+  toolCall: ToolCall,
+  kind: RememberPermissionRuleKind,
+  commandRisk?: string,
+): string {
+  if (kind === "command-risk" && toolCall.type === "run_command" && commandRisk) {
+    return `run_command:${commandRisk}(*)`;
+  }
+
+  if (kind === "path" && toolCall.filePath) {
+    return `${toolCall.type}(${escapePermissionPattern(toolCall.filePath)})`;
+  }
+
+  return `${toolCall.type}(${escapePermissionPattern(getToolPermissionArg(toolCall))})`;
+}
+
+function escapePermissionPattern(value: string): string {
+  const normalized = String(value || "").trim();
+  return normalized || "*";
+}
+
 export function evaluatePermissionRules(
   allowRules: readonly string[],
   denyRules: readonly string[],

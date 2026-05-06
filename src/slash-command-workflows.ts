@@ -40,6 +40,8 @@ export function buildSlashHelpContent(skillLines: string[]): string {
     "- `/fork` — fork the current chat into a new one",
     "- `/branch [name]` — inspect or switch git branches",
     "- `/worktree <name|status|exit>` — isolate this chat in a git worktree",
+    "- `/permissions` — show active allow/deny permission rules",
+    "- `/review [scope]` — review current git diff, optionally with a focus",
     "- `/memory [query|clear]` — inspect or clear saved memory",
     "- `/remember <text>` — save a memory",
     "- `/clear` — clear this chat",

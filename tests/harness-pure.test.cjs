@@ -28,6 +28,7 @@ const {
   applyHarnessEventToSession,
   syncHarnessPendingState,
   clearPendingToolState,
+  markPendingDiffStatus,
   upsertBackgroundTask,
 } = require("../dist/harness/state.js");
 const {
@@ -45,10 +46,13 @@ const {
   shouldAutoExecuteTool,
 } = require("../dist/harness/policy.js");
 const {
+  isAllowedSubagentPath,
+  isAllowedSubagentTool,
   isReadonlySubagentTool,
 } = require("../dist/harness/subagent-policy.js");
 const {
   evaluatePermissionRules,
+  buildRememberedPermissionRule,
   getToolPermissionArg,
   matchesPermissionRule,
 } = require("../dist/permission-workflows.js");
@@ -568,9 +572,14 @@ test("harness state sync rebuilds pending approvals, diffs, and latest todo list
     { toolCallId: "edit-1", toolType: "edit_file", filePath: "src/app.ts" },
     { toolCallId: "read-1", toolType: "read_file", filePath: "src/app.ts" },
   ]);
-  assert.deepEqual(session.harnessState.pendingDiffs, [
-    { toolCallId: "edit-1", filePath: "src/app.ts" },
-  ]);
+  assert.equal(session.harnessState.pendingDiffs.length, 1);
+  assert.equal(session.harnessState.pendingDiffs[0].id, "diff:edit-1");
+  assert.equal(session.harnessState.pendingDiffs[0].toolCallId, "edit-1");
+  assert.equal(session.harnessState.pendingDiffs[0].filePath, "src/app.ts");
+  assert.equal(session.harnessState.pendingDiffs[0].status, "pending");
+  assert.equal(session.harnessState.pendingDiffs[0].previewKind, "inline-diff");
+  assert.equal(typeof session.harnessState.pendingDiffs[0].createdAt, "number");
+  assert.equal(typeof session.harnessState.pendingDiffs[0].updatedAt, "number");
   assert.deepEqual(session.harnessState.todoItems, [
     { content: "step one", status: "pending" },
     { content: "step two", status: "in_progress" },
@@ -612,10 +621,15 @@ test("harness events and task upserts keep session state tidy", () => {
 
   assert.equal(session.harnessState.pendingApprovals.length, 1);
   assert.equal(session.harnessState.pendingDiffs.length, 1);
+  assert.equal(session.harnessState.pendingDiffs[0].status, "pending");
+
+  markPendingDiffStatus(session, "edit-2", "applied");
+  assert.equal(session.harnessState.pendingDiffs[0].status, "applied");
 
   clearPendingToolState(session, "edit-2");
   assert.equal(session.harnessState.pendingApprovals.length, 0);
-  assert.equal(session.harnessState.pendingDiffs.length, 0);
+  assert.equal(session.harnessState.pendingDiffs.length, 1);
+  assert.equal(session.harnessState.pendingDiffs[0].status, "applied");
 
   upsertBackgroundTask(session, {
     id: "bg-old",
@@ -775,6 +789,11 @@ test("policy helpers classify risk and approvals conservatively", () => {
   assert.equal(isReadonlySubagentTool("read_file"), true);
   assert.equal(isReadonlySubagentTool("edit_file"), false);
   assert.equal(isReadonlySubagentTool("task"), false);
+  assert.equal(isAllowedSubagentTool({ subagentReadonly: true }, "edit_file"), false);
+  assert.equal(isAllowedSubagentTool({ subagentReadonly: false }, "edit_file"), true);
+  assert.equal(isAllowedSubagentTool({ subagentReadonly: false }, "run_command"), false);
+  assert.equal(isAllowedSubagentPath(["src/features"], "src/features/a.ts"), true);
+  assert.equal(isAllowedSubagentPath(["src/features"], "src/other/a.ts"), false);
 });
 
 test("permission workflow helpers support wildcard and command-risk rules", () => {
@@ -840,6 +859,30 @@ test("permission workflow helpers support wildcard and command-risk rules", () =
       status: "pending",
     }),
     "inspect permissions",
+  );
+  assert.equal(
+    buildRememberedPermissionRule(
+      {
+        type: "run_command",
+        filePath: "",
+        command: "npm install left-pad",
+        status: "pending",
+      },
+      "command-risk",
+      "network",
+    ),
+    "run_command:network(*)",
+  );
+  assert.equal(
+    buildRememberedPermissionRule(
+      {
+        type: "read_file",
+        filePath: "src/index.ts",
+        status: "pending",
+      },
+      "path",
+    ),
+    "read_file(src/index.ts)",
   );
 });
 
@@ -1885,6 +1928,17 @@ test("prompt workflow helper composes slash skill, local skill intent, auto-rout
     bridgeRepoPromptResult.transientSystemPrompt || "",
     /MUST emit an appropriate PocketAI tool call/i,
   );
+
+  const reviewPromptResult = preparePromptForSend({
+    session: createSession({ selectedModel: "", activeSkills: [] }),
+    prompt: "/review focus on permissions",
+    availableSkills: skills,
+    preferredModel: "gpt-5.4",
+    fallbackTitleNumber: 7,
+  });
+  assert.equal(reviewPromptResult.kind, "ready");
+  assert.match(reviewPromptResult.prompt, /Review the current git diff/);
+  assert.match(reviewPromptResult.prompt, /Focus area: focus on permissions/);
 });
 
 test("prompt workflow helper only injects local clock verification for narrow local time/date prompts", () => {

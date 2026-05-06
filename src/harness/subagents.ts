@@ -1,5 +1,6 @@
 import type { ChatEntry, ChatSession, ToolCall } from "../types";
 import type { ToolLoopDeps } from "../tool-loop";
+import { upsertSubagentTask } from "./state";
 import { HarnessRunner } from "./runner";
 
 const MAX_SUBAGENT_DEPTH = 1;
@@ -20,27 +21,85 @@ export async function executeTaskTool(
   }
 
   const name = (toolCall.subagentName || "subagent").trim() || "subagent";
-  const childSession = createSubagentSession(session, name, taskPrompt);
+  const mode = toolCall.subagentMode === "write" ? "write" : "readonly";
+  const allowedPaths = sanitizeAllowedPaths(toolCall.subagentAllowedPaths);
+  if (mode === "write" && allowedPaths.length === 0) {
+    return "Write-capable subagents require explicit allowed_paths ownership. Use readonly mode or provide the files/directories this subagent owns.";
+  }
+
+  const taskId = toolCall.id || `${session.id}:subagent:${Date.now().toString(36)}`;
+  upsertSubagentTask(session, {
+    id: taskId,
+    name,
+    prompt: taskPrompt,
+    mode,
+    status: "running",
+    allowedPaths,
+    resultPreview: "",
+    updatedAt: Date.now(),
+  });
+  deps.postState();
+
+  const childSession = createSubagentSession(session, name, taskPrompt, mode, allowedPaths);
   const childDeps = createSubagentDeps(deps);
 
   deps.outputChannel.appendLine(
-    `Starting read-only subagent "${name}" for session ${session.id}`,
+    `Starting ${mode} subagent "${name}" for session ${session.id}`,
   );
 
-  const runner = new HarnessRunner(childDeps);
-  const result = await runner.run(childSession);
-  const report = formatSubagentReport(name, childSession.transcript, result.stoppedBecause);
-  deps.outputChannel.appendLine(
-    `Subagent "${name}" finished: ${result.stoppedBecause}`,
-  );
-  return report;
+  try {
+    const runner = new HarnessRunner(childDeps);
+    const result = await runner.run(childSession);
+    const report = formatSubagentReport(name, childSession.transcript, result.stoppedBecause);
+    upsertSubagentTask(session, {
+      id: taskId,
+      name,
+      prompt: taskPrompt,
+      mode,
+      status: "completed",
+      allowedPaths,
+      resultPreview: report,
+      updatedAt: Date.now(),
+    });
+    deps.postState();
+    deps.outputChannel.appendLine(
+      `Subagent "${name}" finished: ${result.stoppedBecause}`,
+    );
+    return report;
+  } catch (error) {
+    const message = `Subagent "${name}" failed: ${(error as Error).message}`;
+    upsertSubagentTask(session, {
+      id: taskId,
+      name,
+      prompt: taskPrompt,
+      mode,
+      status: "failed",
+      allowedPaths,
+      resultPreview: message,
+      updatedAt: Date.now(),
+    });
+    deps.postState();
+    throw error;
+  }
 }
 
 function createSubagentSession(
   parent: ChatSession,
   name: string,
   taskPrompt: string,
+  mode: "readonly" | "write",
+  allowedPaths: string[],
 ): ChatSession {
+  const writeInstructions = mode === "write"
+    ? [
+        `You may edit only these owned paths: ${allowedPaths.join(", ")}.`,
+        "Do not modify files outside those paths. Do not run shell commands, write memory, commit, or delegate to another subagent.",
+      ]
+    : [
+        "You may inspect code, search files, read diagnostics, and compare git status/diff.",
+        "Do not edit files, write memory, run shell commands, commit, or delegate to another subagent.",
+      ];
+
   return {
     ...parent,
     id: `${parent.id}:subagent:${Date.now().toString(36)}`,
@@ -49,10 +108,9 @@ function createSubagentSession(
       {
         role: "user",
         content: [
-          `You are a read-only PocketAI subagent named "${name}".`,
+          `You are a ${mode} PocketAI subagent named "${name}".`,
           "Investigate the focused task below and return a concise report for the parent agent.",
-          "You may inspect code, search files, read diagnostics, and compare git status/diff.",
-          "Do not edit files, write memory, run shell commands, commit, or delegate to another subagent.",
+          ...writeInstructions,
           "Include concrete file references when useful. If blocked, say exactly what is missing.",
           "",
           taskPrompt,
@@ -71,9 +129,11 @@ function createSubagentSession(
       pendingDiffs: [],
       todoItems: [],
       backgroundTasks: [],
+      subagentTasks: [],
     },
     subagentDepth: (parent.subagentDepth ?? 0) + 1,
-    subagentReadonly: true,
+    subagentReadonly: mode !== "write",
+    subagentAllowedPaths: allowedPaths,
   };
 }
 
@@ -90,6 +150,14 @@ function createSubagentDeps(deps: ToolLoopDeps): ToolLoopDeps {
       broadcastToWebviews: () => {},
     },
   };
+}
+
+function sanitizeAllowedPaths(paths: string[] | undefined): string[] {
+  if (!Array.isArray(paths)) return [];
+  return paths
+    .map((item) => String(item || "").trim().replace(/\\/g, "/"))
+    .filter((item) => item && !item.startsWith("/") && !item.startsWith(".."))
+    .slice(0, 12);
 }
 
 function formatSubagentReport(

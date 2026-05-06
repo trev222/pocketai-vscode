@@ -1,4 +1,6 @@
-import type { ToolCallType } from "../types";
+import * as path from "path";
+import type { ChatSession, ToolCallType } from "../types";
+import { isInsidePath } from "../helpers";
 
 export const READONLY_SUBAGENT_TOOL_TYPES: ReadonlySet<ToolCallType> = new Set([
   "list_tools",
@@ -26,4 +28,41 @@ export const READONLY_SUBAGENT_TOOL_TYPES: ReadonlySet<ToolCallType> = new Set([
 
 export function isReadonlySubagentTool(toolType: ToolCallType): boolean {
   return READONLY_SUBAGENT_TOOL_TYPES.has(toolType);
+}
+
+const WRITE_SUBAGENT_TOOL_TYPES: ReadonlySet<ToolCallType> = new Set([
+  ...READONLY_SUBAGENT_TOOL_TYPES,
+  "edit_file",
+  "write_file",
+]);
+
+export function isAllowedSubagentTool(
+  session: Pick<ChatSession, "subagentReadonly" | "subagentAllowedPaths">,
+  toolType: ToolCallType,
+): boolean {
+  return session.subagentReadonly
+    ? isReadonlySubagentTool(toolType)
+    : WRITE_SUBAGENT_TOOL_TYPES.has(toolType);
+}
+
+export function isAllowedSubagentPath(
+  allowedPaths: readonly string[] | undefined,
+  filePath: string,
+): boolean {
+  if (!allowedPaths?.length) return false;
+  const normalizedFilePath = normalizeRelativePath(filePath);
+  if (!normalizedFilePath) return false;
+
+  return allowedPaths.some((allowedPath) => {
+    const normalizedAllowed = normalizeRelativePath(allowedPath);
+    if (!normalizedAllowed) return false;
+    return isInsidePath(normalizedAllowed, normalizedFilePath);
+  });
+}
+
+function normalizeRelativePath(value: string): string {
+  const normalized = path
+    .normalize(String(value || "").replace(/\\/g, "/"))
+    .replace(/^\/+/, "");
+  return normalized === "." || normalized.startsWith("..") ? "" : normalized;
 }

@@ -1063,6 +1063,10 @@ export function getChatStyles(): string {
       color: var(--fg-muted);
     }
 
+    .harness-card-meta-stack {
+      white-space: pre-wrap;
+    }
+
     .harness-card-actions {
       display: flex;
       gap: 6px;

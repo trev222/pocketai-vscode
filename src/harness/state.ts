@@ -3,12 +3,15 @@ import type {
   HarnessBackgroundTask,
   HarnessPendingApproval,
   HarnessPendingDiff,
+  HarnessSubagentTask,
   HarnessTodoItem,
   ToolCall,
 } from "../types";
 import type { HarnessEvent } from "./types";
 
 const MAX_BACKGROUND_TASKS = 20;
+const MAX_SUBAGENT_TASKS = 10;
+const MAX_DIFF_ARTIFACTS = 20;
 
 export function createEmptyHarnessSessionState() {
   return {
@@ -16,6 +19,7 @@ export function createEmptyHarnessSessionState() {
     pendingDiffs: [],
     todoItems: [],
     backgroundTasks: [],
+    subagentTasks: [],
   };
 }
 
@@ -26,7 +30,7 @@ export function applyHarnessEventToSession(
   switch (event.type) {
     case "turn_started":
       session.harnessState.pendingApprovals = [];
-      session.harnessState.pendingDiffs = [];
+      markPendingDiffsStale(session);
       return;
     case "tool_call_pending_approval":
       if (!event.toolCallId) return;
@@ -39,20 +43,24 @@ export function applyHarnessEventToSession(
     case "diff_ready":
       if (!event.toolCallId || !event.detail) return;
       upsertPendingDiff(session, {
+        id: `diff:${event.toolCallId}`,
         toolCallId: event.toolCallId,
         filePath: event.detail,
+        status: "pending",
+        previewKind: "inline-diff",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
       });
       return;
     case "tool_call_started":
     case "tool_call_completed":
     case "tool_call_failed":
       if (!event.toolCallId) return;
-      clearPendingToolState(session, event.toolCallId);
+      clearPendingToolApproval(session, event.toolCallId);
       return;
     case "turn_completed":
     case "turn_failed":
       session.harnessState.pendingApprovals = [];
-      session.harnessState.pendingDiffs = [];
       return;
     default:
       return;
@@ -74,8 +82,13 @@ export function syncHarnessPendingState(session: ChatSession) {
       });
       if (toolCall.type === "edit_file" && toolCall.filePath) {
         pendingDiffs.push({
+          id: `diff:${toolCall.id}`,
           toolCallId: toolCall.id,
           filePath: toolCall.filePath,
+          status: "pending",
+          previewKind: "inline-diff",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
         });
       }
     }
@@ -90,13 +103,36 @@ export function clearPendingToolState(
   session: ChatSession,
   toolCallId: string,
 ) {
+  clearPendingToolApproval(session, toolCallId);
+  const diff = session.harnessState.pendingDiffs.find(
+    (item) => item.toolCallId === toolCallId,
+  );
+  if (diff?.status === "pending") {
+    markPendingDiffStatus(session, toolCallId, "stale");
+  }
+}
+
+export function markPendingDiffStatus(
+  session: ChatSession,
+  toolCallId: string,
+  status: HarnessPendingDiff["status"],
+) {
+  const diff = session.harnessState.pendingDiffs.find(
+    (item) => item.toolCallId === toolCallId,
+  );
+  if (!diff) return;
+  diff.status = status;
+  diff.updatedAt = Date.now();
+}
+
+function clearPendingToolApproval(
+  session: ChatSession,
+  toolCallId: string,
+) {
   session.harnessState.pendingApprovals =
     session.harnessState.pendingApprovals.filter(
       (item) => item.toolCallId !== toolCallId,
     );
-  session.harnessState.pendingDiffs = session.harnessState.pendingDiffs.filter(
-    (item) => item.toolCallId !== toolCallId,
-  );
 }
 
 export function upsertBackgroundTask(
@@ -109,6 +145,18 @@ export function upsertBackgroundTask(
   session.harnessState.backgroundTasks = [task, ...withoutCurrent]
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, MAX_BACKGROUND_TASKS);
+}
+
+export function upsertSubagentTask(
+  session: ChatSession,
+  task: HarnessSubagentTask,
+) {
+  const withoutCurrent = session.harnessState.subagentTasks.filter(
+    (item) => item.id !== task.id,
+  );
+  session.harnessState.subagentTasks = [task, ...withoutCurrent]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_SUBAGENT_TASKS);
 }
 
 function upsertPendingApproval(
@@ -127,7 +175,19 @@ function upsertPendingDiff(session: ChatSession, pendingDiff: HarnessPendingDiff
     (item) => item.toolCallId !== pendingDiff.toolCallId,
   );
   next.push(pendingDiff);
-  session.harnessState.pendingDiffs = next;
+  session.harnessState.pendingDiffs = next
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, MAX_DIFF_ARTIFACTS);
+}
+
+function markPendingDiffsStale(session: ChatSession) {
+  const now = Date.now();
+  for (const diff of session.harnessState.pendingDiffs) {
+    if (diff.status === "pending") {
+      diff.status = "stale";
+      diff.updatedAt = now;
+    }
+  }
 }
 
 function dedupeByToolCallId<T extends { toolCallId: string }>(items: T[]): T[] {

@@ -448,6 +448,7 @@ export function parseToolCalls(text: string): ToolCall[] {
       filePath: "",
       subagentName: hasName ? parts[0] : undefined,
       taskPrompt: hasName ? parts.slice(1).join(" | ") : raw,
+      subagentMode: "readonly",
       status: "pending",
     });
   }
