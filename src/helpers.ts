@@ -436,6 +436,22 @@ export function parseToolCalls(text: string): ToolCall[] {
     });
   }
 
+  // task / subagent (optional: name | prompt)
+  const taskRegex = /@task:\s*(.+?)(?:\n|$)/g;
+  while ((match = taskRegex.exec(text)) !== null) {
+    const raw = match[1].trim();
+    const parts = raw.split("|").map((s) => s.trim()).filter(Boolean);
+    const hasName = parts.length >= 2 && parts[0].length <= 40;
+    calls.push({
+      id: generateToolCallId(),
+      type: "task",
+      filePath: "",
+      subagentName: hasName ? parts[0] : undefined,
+      taskPrompt: hasName ? parts.slice(1).join(" | ") : raw,
+      status: "pending",
+    });
+  }
+
   // memory_read
   const memReadRegex = /@memory_read(?::\s*(.+?))?(?:\n|$)/g;
   while ((match = memReadRegex.exec(text)) !== null) {

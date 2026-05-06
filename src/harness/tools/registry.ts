@@ -238,6 +238,14 @@ function createBuiltinToolBehaviors(
     execute: async ({ session, toolCall }) =>
       executeTodoWriteTool(deps, session, toolCall),
   },
+  task: {
+    approvalPolicy: "always-auto",
+    previewKind: "none",
+    execute: async ({ session, toolCall }) => {
+      const { executeTaskTool } = await import("../subagents");
+      return executeTaskTool(deps, session, toolCall);
+    },
+  },
   memory_read: {
     approvalPolicy: "always-auto",
     previewKind: "none",

@@ -774,6 +774,37 @@ export const TOOL_DEFINITIONS: OpenAITool[] = [
   },
 
   /* ------------------------------------------------------------------ */
+  /*  Task / Subagent                                                    */
+  /* ------------------------------------------------------------------ */
+  {
+    type: "function",
+    function: {
+      name: "task",
+      description:
+        "Delegate a focused read-only investigation to a child agent and wait for its report. " +
+        "Use this when a subtask can be explored independently, such as inspecting a subsystem, comparing files, or finding risks. " +
+        "The child agent can read/search/analyze but cannot edit files, run arbitrary shell commands, commit, or write memory. " +
+        "Ask for a concise report with file references and concrete findings.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "Focused instructions for the child agent. Include the exact question, scope, and desired output.",
+          },
+          name: {
+            type: "string",
+            description:
+              "Optional short role/name for the child agent, such as reviewer, explorer, or tester.",
+          },
+        },
+        required: ["prompt"],
+      },
+    },
+  },
+
+  /* ------------------------------------------------------------------ */
   /*  Memory Read                                                        */
   /* ------------------------------------------------------------------ */
   {

@@ -30,6 +30,7 @@ export type ToolCallType =
   | "git_diff"
   | "git_commit"
   | "todo_write"
+  | "task"
   | "memory_read"
   | "memory_write"
   | "memory_delete";
@@ -82,6 +83,9 @@ export type ToolCall = {
   commitMessage?: string;
   // todo_write
   todos?: Array<{ content: string; status: string }>;
+  // task/subagent
+  subagentName?: string;
+  taskPrompt?: string;
   // memory tools
   memoryType?: string;
   memoryName?: string;
@@ -204,6 +208,8 @@ export type ChatSession = {
   selectedReasoningEffort: string;
   selectedEndpoint: string;
   worktreeRoot?: string;
+  subagentDepth?: number;
+  subagentReadonly?: boolean;
   status: string;
   updatedAt: number;
   busy: boolean;

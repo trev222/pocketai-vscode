@@ -36,11 +36,22 @@ const {
   isInsidePath,
 } = require("../dist/helpers.js");
 const {
+  NON_DESTRUCTIVE_TOOL_TYPES,
+} = require("../dist/constants.js");
+const {
   classifyToolRisk,
   classifyShellCommandRisk,
   getToolApprovalDecision,
   shouldAutoExecuteTool,
 } = require("../dist/harness/policy.js");
+const {
+  isReadonlySubagentTool,
+} = require("../dist/harness/subagent-policy.js");
+const {
+  evaluatePermissionRules,
+  getToolPermissionArg,
+  matchesPermissionRule,
+} = require("../dist/permission-workflows.js");
 const {
   classifyHarnessError,
   canRecoverRepeatedToolLoop,
@@ -646,9 +657,10 @@ test("parseToolCalls understands newer IDE and editor-action tools", () => {
 @run_command: --background npm test
 @grep: pocketai --glob *.ts --output files_with_matches --context 2 -i
 @todo_write: one | two | three
+@task: reviewer | inspect auth flow and report risks
 `);
 
-  assert.equal(calls.length, 8);
+  assert.equal(calls.length, 9);
   assert.deepEqual(
     calls.map((call) => call.type),
     [
@@ -660,6 +672,7 @@ test("parseToolCalls understands newer IDE and editor-action tools", () => {
       "run_command",
       "grep",
       "todo_write",
+      "task",
     ],
   );
 
@@ -683,6 +696,8 @@ test("parseToolCalls understands newer IDE and editor-action tools", () => {
       { content: "three", status: "pending" },
     ],
   );
+  assert.equal(calls[8].subagentName, "reviewer");
+  assert.equal(calls[8].taskPrompt, "inspect auth flow and report risks");
 });
 
 test("stripFabricatedResults removes fake tool calls and fabricated dialogue", () => {
@@ -700,6 +715,7 @@ test("policy helpers classify risk and approvals conservatively", () => {
   assert.equal(classifyToolRisk("read_file"), "safe");
   assert.equal(classifyToolRisk("run_command"), "caution");
   assert.equal(classifyToolRisk("git_commit"), "destructive");
+  assert.equal(classifyToolRisk("task"), "safe");
   assert.equal(classifyToolRisk("memory_write"), "caution");
   assert.equal(classifyToolRisk("mcp__foo", true), "external");
 
@@ -755,6 +771,76 @@ test("policy helpers classify risk and approvals conservatively", () => {
     false,
   );
   assert.equal(shouldAutoExecuteTool("ask", commandCall), false);
+  assert.equal(NON_DESTRUCTIVE_TOOL_TYPES.has("task"), true);
+  assert.equal(isReadonlySubagentTool("read_file"), true);
+  assert.equal(isReadonlySubagentTool("edit_file"), false);
+  assert.equal(isReadonlySubagentTool("task"), false);
+});
+
+test("permission workflow helpers support wildcard and command-risk rules", () => {
+  assert.equal(
+    matchesPermissionRule("read_file(src/**)", {
+      toolType: "read_file",
+      toolArg: "src/index.ts",
+    }),
+    true,
+  );
+  assert.equal(
+    matchesPermissionRule("read_file(src/**)", {
+      toolType: "read_file",
+      toolArg: "package.json",
+    }),
+    false,
+  );
+  assert.equal(
+    matchesPermissionRule("run_command:network(*)", {
+      toolType: "run_command",
+      toolArg: "npm install left-pad",
+      commandRisk: "network",
+    }),
+    true,
+  );
+  assert.equal(
+    matchesPermissionRule("run_command:network(*)", {
+      toolType: "run_command",
+      toolArg: "npm test",
+      commandRisk: "safe",
+    }),
+    false,
+  );
+  assert.equal(
+    evaluatePermissionRules(
+      ["run_command:safe(npm test)"],
+      ["run_command:network(*)"],
+      {
+        toolType: "run_command",
+        toolArg: "npm install left-pad",
+        commandRisk: "network",
+      },
+    ),
+    "deny",
+  );
+  assert.equal(
+    evaluatePermissionRules(
+      ["run_command:safe(npm test)"],
+      ["run_command:network(*)"],
+      {
+        toolType: "run_command",
+        toolArg: "npm test",
+        commandRisk: "safe",
+      },
+    ),
+    "allow",
+  );
+  assert.equal(
+    getToolPermissionArg({
+      type: "task",
+      filePath: "",
+      taskPrompt: "inspect permissions",
+      status: "pending",
+    }),
+    "inspect permissions",
+  );
 });
 
 test("isInsidePath rejects sibling paths with shared prefixes", () => {

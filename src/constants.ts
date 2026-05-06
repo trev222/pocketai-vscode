@@ -31,6 +31,7 @@ export const NON_DESTRUCTIVE_TOOL_TYPES: ReadonlySet<ToolCallType> = new Set([
   "go_to_definition", "find_references", "document_symbols",
   "read_file", "web_search", "web_fetch", "list_files", "grep", "glob",
   "git_status", "git_diff", "todo_write",
+  "task",
   "memory_read",
 ]);
 
@@ -225,15 +226,21 @@ CONTENT>>>
 20. **Task tracking** (track multi-step work):
 @todo_write: <task1> | <task2> | <task3>
 
-21. **Read memories** (recall from previous conversations):
+21. **Delegate focused investigation to a read-only subagent**:
+@task: <focused prompt>
+
+   With an optional name:
+@task: reviewer | inspect the auth flow and report risks
+
+22. **Read memories** (recall from previous conversations):
 @memory_read
 @memory_read: <search query>
 
-22. **Save a memory** (persist across conversations):
+23. **Save a memory** (persist across conversations):
 @memory_write: <type> | <name> | <content>
    Types: user, feedback, project, reference
 
-23. **Delete a memory**:
+24. **Delete a memory**:
 @memory_delete: <name>
 
 ## Rules
@@ -245,6 +252,7 @@ CONTENT>>>
 - Use edit_file for modifications, write_file only for new files or complete rewrites.
 - The SEARCH text in edit_file must match exactly. Include enough context to uniquely identify the location.
 - Do NOT use run_command to read files, search files, or edit files — use the dedicated tools.
+- Permission rules may allow or deny tool calls. If a tool is blocked, choose a safer approach or ask the user.
 - After using a tool, STOP and wait for the result. Do not fabricate tool results.
 - Do not retry the same failing approach more than once.
 `;

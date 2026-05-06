@@ -2,6 +2,7 @@ import type { ChatSession, ToolCall } from "../types";
 import type { ToolLoopDeps } from "../tool-loop";
 import { executeToolCallWithHooks } from "../tool-executor";
 import { createHarnessEvent, emitHarnessEvent } from "./events";
+import { isReadonlySubagentTool } from "./subagent-policy";
 import type { HarnessToolRegistry, HarnessToolRuntime } from "./types";
 
 export class DefaultHarnessToolRuntime implements HarnessToolRuntime {
@@ -46,6 +47,10 @@ export class DefaultHarnessToolRuntime implements HarnessToolRuntime {
     session: ChatSession,
     toolCall: ToolCall,
   ): Promise<string> {
+    if (session.subagentReadonly && !isReadonlySubagentTool(toolCall.type)) {
+      return `Subagent blocked ${toolCall.type}: read-only subagents can inspect and report, but cannot mutate state or delegate.`;
+    }
+
     const descriptor = this.registry.getToolDescriptor(toolCall.type);
     if (descriptor?.execute) {
       return descriptor.execute({

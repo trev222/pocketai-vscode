@@ -1,13 +1,17 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { matchGlob } from "./helpers";
+import { classifyShellCommandRisk } from "./harness/policy";
+import {
+  evaluatePermissionRules,
+  type PermissionDecision,
+} from "./permission-workflows";
 
 export function checkPermissionRules(
   config: vscode.WorkspaceConfiguration,
   toolType: string,
   toolArg: string,
-): "allow" | "deny" | "default" {
+): PermissionDecision {
   const permissions = config.get<{ allow?: string[]; deny?: string[] }>("permissions") ?? {};
   const denyRules = permissions.deny ?? [];
   const allowRules = permissions.allow ?? [];
@@ -24,20 +28,12 @@ export function checkPermissionRules(
     } catch {}
   }
 
-  const matchRule = (rule: string): boolean => {
-    const ruleMatch = rule.match(/^(\w+)\((.+)\)$/);
-    if (!ruleMatch) return false;
-    const [, ruleType, rulePattern] = ruleMatch;
-    if (ruleType !== toolType) return false;
-    return matchGlob(rulePattern, toolArg);
-  };
-
-  // Deny takes precedence
-  for (const rule of denyRules) {
-    if (matchRule(rule)) return "deny";
-  }
-  for (const rule of allowRules) {
-    if (matchRule(rule)) return "allow";
-  }
-  return "default";
+  return evaluatePermissionRules(allowRules, denyRules, {
+    toolType,
+    toolArg,
+    commandRisk:
+      toolType === "run_command"
+        ? classifyShellCommandRisk(toolArg)
+        : undefined,
+  });
 }

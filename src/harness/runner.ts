@@ -2,6 +2,8 @@ import type { ChatSession, ToolCall } from "../types";
 import { MAX_TOOL_TURNS } from "../constants";
 import type { ToolLoopDeps } from "../tool-loop";
 import { getSessionWorkspaceRoot } from "../workspace-roots";
+import { checkPermissionRules } from "../permissions";
+import { getToolPermissionArg } from "../permission-workflows";
 import { createHarnessEvent, emitHarnessEvent } from "./events";
 import { shouldAutoExecuteTool } from "./policy";
 import { DefaultHarnessModelProvider } from "./provider";
@@ -342,7 +344,31 @@ export class HarnessRunner {
 
     for (const toolCall of toolCalls) {
       const descriptor = this.registry.getToolDescriptor(toolCall.type);
-      if (!shouldAutoExecuteTool(session.mode, toolCall, descriptor)) {
+      const toolArg = getToolPermissionArg(toolCall);
+      const permission = checkPermissionRules(
+        this.deps.config,
+        toolCall.type,
+        toolArg,
+      );
+
+      if (permission === "deny") {
+        toolCall.status = "executed";
+        toolCall.result = `Blocked by permission rule: ${toolCall.type}(${toolArg})`;
+        session.transcript.push({
+          role: "tool",
+          content: toolCall.result,
+        });
+        continue;
+      }
+
+      const allowedByRule =
+        session.mode !== "plan" &&
+        permission === "allow" &&
+        descriptor?.approvalPolicy !== "always-ask";
+      if (
+        !allowedByRule &&
+        !shouldAutoExecuteTool(session.mode, toolCall, descriptor)
+      ) {
         continue;
       }
 

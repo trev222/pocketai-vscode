@@ -4,7 +4,6 @@ import * as child_process from "child_process";
 import * as vscode from "vscode";
 import type {
   ToolCall,
-  ToolCallType,
   ChatSession,
   HarnessBackgroundTask,
   HarnessBackgroundTaskStatus,
@@ -12,6 +11,7 @@ import type {
 import { formatFileSize, isInsidePath } from "./helpers";
 import { getSessionWorkspaceRoot } from "./workspace-roots";
 import { checkPermissionRules } from "./permissions";
+import { getToolPermissionArg } from "./permission-workflows";
 import { runHooks } from "./hooks";
 import { createCheckpoint } from "./checkpoints";
 import { EXCLUDED_DIRS, EXCLUDED_DIRS_GLOB } from "./constants";
@@ -37,19 +37,6 @@ export function markFileReadInSession(filePath: string) {
   filesReadInSession.add(filePath);
 }
 
-/** Returns the primary argument for a tool call (used for permission checks). */
-function getToolArg(tc: ToolCall): string {
-  const argByType: Partial<Record<ToolCallType, string>> = {
-    web_search: tc.query || "",
-    web_fetch: tc.url || "",
-    run_command: tc.command || "",
-    grep: tc.pattern || "",
-    glob: tc.glob || "",
-    git_commit: tc.commitMessage || "",
-  };
-  return argByType[tc.type] ?? tc.filePath;
-}
-
 export async function executeToolCall(
   config: vscode.WorkspaceConfiguration,
   outputChannel: vscode.OutputChannel,
@@ -72,7 +59,7 @@ export async function executeToolCall(
     : rootPath;
 
   // Check permission rules
-  const toolArg = getToolArg(toolCall);
+  const toolArg = getToolPermissionArg(toolCall);
   const permission = checkPermissionRules(config, toolCall.type, toolArg);
   if (permission === "deny") {
     return `Blocked by permission rule: ${toolCall.type}(${toolArg})`;

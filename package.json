@@ -175,15 +175,15 @@
             "allow": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Glob patterns for auto-allowed tool calls, e.g. 'read_file(**)', 'run_command(npm run *)'"
+              "description": "Glob patterns for trusted tool calls, e.g. 'read_file(**)', 'run_command(npm run *)', 'run_command:safe(npm test)'"
             },
             "deny": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "Glob patterns for denied tool calls, e.g. 'read_file(*.env)', 'run_command(rm *)'"
+              "description": "Glob patterns for denied tool calls, e.g. 'read_file(*.env)', 'run_command(rm *)', 'run_command:network(*)'"
             }
           },
-          "description": "Wildcard permission rules for tool calls. Deny rules take precedence over allow rules."
+          "description": "Wildcard permission rules for tool calls. Deny rules take precedence over allow rules. run_command rules can be qualified with safe, caution, network, long-running, or destructive."
         },
         "pocketai.useStructuredTools": {
           "type": "boolean",

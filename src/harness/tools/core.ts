@@ -8,6 +8,7 @@ import { formatFileSize, isInsidePath } from "../../helpers";
 import { getSessionWorkspaceRoot } from "../../workspace-roots";
 import { runHooks } from "../../hooks";
 import { checkPermissionRules } from "../../permissions";
+import { getToolPermissionArg } from "../../permission-workflows";
 import type { ToolLoopDeps } from "../../tool-loop";
 import {
   cancelBackgroundTask,
@@ -18,7 +19,7 @@ import {
   startBackgroundCommand,
 } from "../../tool-executor";
 import type { MemoryType } from "../../memory-manager";
-import type { ChatSession, ToolCall, ToolCallType } from "../../types";
+import type { ChatSession, ToolCall } from "../../types";
 
 type GuardedContext = {
   rootPath: string;
@@ -717,7 +718,7 @@ async function withStandardGuards(
     ? path.resolve(rootPath, toolCall.filePath)
     : rootPath;
 
-  const toolArg = getToolArg(toolCall);
+  const toolArg = getToolPermissionArg(toolCall);
   const permission = checkPermissionRules(deps.config, toolCall.type, toolArg);
   if (permission === "deny") {
     return `Blocked by permission rule: ${toolCall.type}(${toolArg})`;
@@ -742,18 +743,6 @@ async function withStandardGuards(
     file: toolCall.filePath,
   });
   return result;
-}
-
-function getToolArg(toolCall: ToolCall): string {
-  const argByType: Partial<Record<ToolCallType, string>> = {
-    web_search: toolCall.query || "",
-    web_fetch: toolCall.url || "",
-    run_command: toolCall.command || "",
-    grep: toolCall.pattern || "",
-    glob: toolCall.glob || "",
-    git_commit: toolCall.commitMessage || "",
-  };
-  return argByType[toolCall.type] ?? toolCall.filePath;
 }
 
 function extractTextFromHtml(html: string): string {
