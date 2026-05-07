@@ -1346,6 +1346,8 @@ test("slash command helpers parse jobs subcommands and format core reports", () 
     endpointName: "Codex Bridge",
     endpointUrl: "http://127.0.0.1:39458",
     providerKind: "codex-bridge",
+    providerLabel: "Codex Bridge",
+    providerDescription: "Codex bridge endpoint with model and reasoning controls",
     healthy: false,
     selectedModel: "gpt-5.4",
     mode: "auto",
@@ -1366,7 +1368,8 @@ test("slash command helpers parse jobs subcommands and format core reports", () 
     },
   });
   assert.match(doctorReport, /PocketAI doctor:/);
-  assert.match(doctorReport, /Provider: `codex-bridge`/);
+  assert.match(doctorReport, /Provider: Codex Bridge \(`codex-bridge`\)/);
+  assert.match(doctorReport, /Provider detail: Codex bridge endpoint/);
   assert.match(doctorReport, /Active skills: Debug/);
   assert.match(doctorReport, /Suggested next actions:/);
 

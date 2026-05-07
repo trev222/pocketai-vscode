@@ -49,8 +49,14 @@ export function buildHarnessRuntimeHealth(options: {
 
   if (!resolvedAvailableModels.length) {
     level = level === "error" ? "error" : "warning";
-    issues.push("No models are currently loaded for this session endpoint.");
-    suggestions.push("Refresh models or verify the endpoint is exposing chat models.");
+    issues.push(
+      `No models are currently loaded for this ${capabilities.label} endpoint.`,
+    );
+    suggestions.push(
+      capabilities.requiresBridgeBootstrap
+        ? `Connect or restart ${capabilities.label}, then refresh models.`
+        : "Refresh models or verify the endpoint is exposing chat models.",
+    );
     actions.add("refresh-models");
   }
 
@@ -97,7 +103,9 @@ export function buildHarnessRuntimeHealth(options: {
   }
 
   if (!capabilities.supportsStructuredTools) {
-    suggestions.push("Structured tool calling is unavailable on this provider, so expect more text-first turns.");
+    suggestions.push(
+      `Structured tool calling is unavailable on ${capabilities.label}, so expect more text-first turns.`,
+    );
   }
 
   const summary =

@@ -100,6 +100,8 @@ export function buildDoctorReport(options: {
   endpointName: string;
   endpointUrl: string;
   providerKind: EndpointProviderKind;
+  providerLabel: string;
+  providerDescription: string;
   healthy: boolean;
   selectedModel: string;
   mode: InteractionMode;
@@ -116,7 +118,8 @@ export function buildDoctorReport(options: {
   const lines = [
     `- Endpoint: **${options.endpointName || "Unknown"}**`,
     `- URL: \`${options.endpointUrl}\``,
-    `- Provider: \`${options.providerKind}\``,
+    `- Provider: ${options.providerLabel} (\`${options.providerKind}\`)`,
+    `- Provider detail: ${options.providerDescription}`,
     `- Healthy: ${options.healthy ? "yes" : "no"}`,
     `- Model: \`${options.selectedModel || "(auto)"}\``,
     `- Mode: \`${options.mode}\``,

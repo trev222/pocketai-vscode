@@ -468,6 +468,8 @@ export async function handleSlashCommand(
           endpointName: endpoint.name || "Unknown",
           endpointUrl: endpoint.url || endpointUrl,
           providerKind: capabilities.kind,
+          providerLabel: capabilities.label,
+          providerDescription: capabilities.description,
           healthy: !!health?.healthy,
           selectedModel: session.selectedModel,
           mode: session.mode,

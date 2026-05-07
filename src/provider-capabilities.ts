@@ -63,7 +63,7 @@ export function getEndpointCapabilities(
   };
 }
 
-function getEndpointProviderProfile(kind: EndpointProviderKind): {
+export function getEndpointProviderProfile(kind: EndpointProviderKind): {
   label: string;
   description: string;
 } {
