@@ -1755,6 +1755,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
       models: modelControls.models,
       selectedModel: modelControls.selectedModel,
       providerKind: modelControls.providerKind,
+      providerLabel: modelControls.providerLabel,
+      providerDescription: modelControls.providerDescription,
       selectedReasoningEffort: modelControls.selectedReasoningEffort,
       showReasoningControl: modelControls.showReasoningControl,
       reasoningOptions: modelControls.reasoningOptions,

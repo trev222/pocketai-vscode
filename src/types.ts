@@ -391,6 +391,8 @@ export type ExtensionToWebviewMessage = {
   models: string[];
   selectedModel: string;
   providerKind: EndpointProviderKind;
+  providerLabel: string;
+  providerDescription: string;
   selectedReasoningEffort: string;
   showReasoningControl: boolean;
   reasoningOptions: string[];

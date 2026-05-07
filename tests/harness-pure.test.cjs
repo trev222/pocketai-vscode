@@ -1048,6 +1048,8 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     getEndpointCapabilities("http://127.0.0.1:39458"),
     {
       kind: "codex-bridge",
+      label: "Codex Bridge",
+      description: "Codex bridge endpoint with model and reasoning controls",
       supportsStructuredTools: true,
       supportsReasoningEffort: true,
       requiresBridgeBootstrap: true,
@@ -1058,6 +1060,8 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     getEndpointCapabilities("http://127.0.0.1:39460"),
     {
       kind: "claude-bridge",
+      label: "Claude Bridge",
+      description: "Claude bridge endpoint with PocketAI-compatible tools",
       supportsStructuredTools: true,
       supportsReasoningEffort: false,
       requiresBridgeBootstrap: true,
@@ -1070,6 +1074,8 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     }),
     {
       kind: "openai-compatible",
+      label: "OpenAI-compatible",
+      description: "OpenAI-compatible chat endpoint",
       supportsStructuredTools: false,
       supportsReasoningEffort: false,
       requiresBridgeBootstrap: false,
@@ -1080,6 +1086,8 @@ test("provider capabilities and chat controls honor provider kind and codex reas
     getEndpointCapabilities("https://opencode.ai/zen/go"),
     {
       kind: "openai-compatible",
+      label: "OpenAI-compatible",
+      description: "OpenAI-compatible chat endpoint",
       supportsStructuredTools: true,
       supportsReasoningEffort: false,
       requiresBridgeBootstrap: false,
@@ -1144,6 +1152,8 @@ test("provider capabilities and chat controls honor provider kind and codex reas
       models: ["qwen"],
       selectedModel: "qwen",
       providerKind: "local-pocketai",
+      providerLabel: "Local LLM",
+      providerDescription: "Local PocketAI-compatible endpoint",
       selectedReasoningEffort: "",
       showReasoningControl: false,
       reasoningOptions: [],
@@ -1165,6 +1175,8 @@ test("provider capabilities and chat controls honor provider kind and codex reas
       models: ["gpt-5.4", "gpt-5.4-mini"],
       selectedModel: "gpt-5.4",
       providerKind: "codex-bridge",
+      providerLabel: "Codex Bridge",
+      providerDescription: "Codex bridge endpoint with model and reasoning controls",
       selectedReasoningEffort: "high",
       showReasoningControl: true,
       reasoningOptions: ["low", "high"],

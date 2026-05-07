@@ -2950,10 +2950,14 @@ export function getChatScript(brandIconUri: string): string {
           "No models available";
       }
       if (modelTrigger) {
-        modelTrigger.title =
+        const providerPrefix = payload.providerLabel
+          ? payload.providerLabel + ": "
+          : "";
+        modelTrigger.title = providerPrefix + (
           selectedModel ||
           modelSelect.value ||
-          "No models available";
+          "No models available"
+        );
       }
 
       modelSelect.disabled = !!payload.busy || models.length === 0;

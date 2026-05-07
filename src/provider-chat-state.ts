@@ -9,6 +9,8 @@ export type ProviderChatControlsState = {
   models: string[];
   selectedModel: string;
   providerKind: EndpointProviderKind;
+  providerLabel: string;
+  providerDescription: string;
   selectedReasoningEffort: string;
   showReasoningControl: boolean;
   reasoningOptions: string[];
@@ -64,6 +66,8 @@ export function buildProviderChatControlsState(options: {
     models: options.availableModels,
     selectedModel: options.session.selectedModel,
     providerKind: capabilities.kind,
+    providerLabel: capabilities.label,
+    providerDescription: capabilities.description,
     selectedReasoningEffort: "",
     showReasoningControl: capabilities.supportsReasoningEffort,
     reasoningOptions: [],

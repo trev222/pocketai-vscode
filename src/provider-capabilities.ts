@@ -14,6 +14,8 @@ export type EndpointProviderKind =
 
 export type EndpointCapabilities = {
   kind: EndpointProviderKind;
+  label: string;
+  description: string;
   supportsStructuredTools: boolean;
   supportsReasoningEffort: boolean;
   requiresBridgeBootstrap: boolean;
@@ -40,9 +42,12 @@ export function getEndpointCapabilities(
 ): EndpointCapabilities {
   const kind = getEndpointProviderKind(url);
   const structuredToolsEnabled = options?.structuredToolsEnabled ?? true;
+  const profile = getEndpointProviderProfile(kind);
 
   return {
     kind,
+    label: profile.label,
+    description: profile.description,
     supportsStructuredTools:
       structuredToolsEnabled,
     supportsReasoningEffort: kind === "codex-bridge",
@@ -56,4 +61,33 @@ export function getEndpointCapabilities(
       kind !== "claude-bridge" &&
       !isOpenCodeGoEndpoint(url),
   };
+}
+
+function getEndpointProviderProfile(kind: EndpointProviderKind): {
+  label: string;
+  description: string;
+} {
+  switch (kind) {
+    case "local-pocketai":
+      return {
+        label: "Local LLM",
+        description: "Local PocketAI-compatible endpoint",
+      };
+    case "codex-bridge":
+      return {
+        label: "Codex Bridge",
+        description: "Codex bridge endpoint with model and reasoning controls",
+      };
+    case "claude-bridge":
+      return {
+        label: "Claude Bridge",
+        description: "Claude bridge endpoint with PocketAI-compatible tools",
+      };
+    case "openai-compatible":
+    default:
+      return {
+        label: "OpenAI-compatible",
+        description: "OpenAI-compatible chat endpoint",
+      };
+  }
 }
