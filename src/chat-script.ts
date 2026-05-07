@@ -1591,6 +1591,9 @@ export function getChatScript(brandIconUri: string): string {
       const pendingApprovals = Array.isArray(harnessState.pendingApprovals)
         ? harnessState.pendingApprovals
         : [];
+      const pendingApprovalIds = new Set(
+        pendingApprovals.map((approval) => approval && approval.toolCallId).filter(Boolean),
+      );
       const now = Date.now();
       const changeSets = (Array.isArray(harnessState.changeSets)
         ? harnessState.changeSets
@@ -1876,7 +1879,8 @@ export function getChatScript(brandIconUri: string): string {
 
           const meta = document.createElement("div");
           meta.className = "harness-card-meta";
-          const toolCount = Array.isArray(changeSet.toolCallIds) ? changeSet.toolCallIds.length : 0;
+          const toolCallIds = Array.isArray(changeSet.toolCallIds) ? changeSet.toolCallIds : [];
+          const toolCount = toolCallIds.length;
           meta.textContent =
             filePaths.length + " file" + (filePaths.length === 1 ? "" : "s") +
             " / " + toolCount + " tool" + (toolCount === 1 ? "" : "s");
@@ -1893,7 +1897,10 @@ export function getChatScript(brandIconUri: string): string {
             vscode.postMessage({ type: "openChangeSet", changeSetId: changeSet.id });
           actions.appendChild(viewBtn);
 
-          if (changeSet.status === "pending" || changeSet.status === "partially_applied") {
+          const hasPendingTools = toolCallIds.some((toolCallId) =>
+            pendingApprovalIds.has(toolCallId),
+          );
+          if (hasPendingTools) {
             const approveBtn = document.createElement("button");
             approveBtn.className = "tool-btn tool-btn-approve";
             approveBtn.textContent = "Approve Set";

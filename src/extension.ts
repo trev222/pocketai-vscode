@@ -1372,14 +1372,18 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     );
     if (!changeSet) return;
 
+    let resolvedAny = false;
     for (const toolCallId of changeSet.toolCallIds) {
       const resolved = findToolCallInTranscript(session.transcript, toolCallId);
       if (!resolved?.toolCall || resolved.toolCall.status !== "pending") {
         continue;
       }
+      resolvedAny = true;
       this.inlineDiffMgr.clearChange(toolCallId);
       await this.applyToolApprovalDecision(session, resolved.toolCall, approved);
     }
+
+    if (!resolvedAny) return;
 
     this.sessionMgr.touchSession(session);
     await this.sessionMgr.saveState();
