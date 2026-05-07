@@ -582,6 +582,24 @@ test("harness state sync rebuilds pending approvals, diffs, and latest todo list
     { toolCallId: "read-1", toolType: "read_file", filePath: "src/app.ts" },
     { toolCallId: "write-1", toolType: "write_file", filePath: "src/new.ts" },
   ]);
+  const runApprovalSession = createSession({
+    transcript: [{
+      role: "assistant",
+      content: "",
+      toolCalls: [{
+        id: "cmd-1",
+        type: "run_command",
+        filePath: "",
+        command: "echo hello > out.txt",
+        status: "pending",
+      }],
+    }],
+  });
+  syncHarnessPendingState(runApprovalSession);
+  assert.equal(
+    runApprovalSession.harnessState.pendingApprovals[0].commandRisk,
+    "writes",
+  );
   assert.equal(session.harnessState.pendingDiffs.length, 1);
   assert.equal(session.harnessState.pendingDiffs[0].id, "diff:edit-1");
   assert.equal(session.harnessState.pendingDiffs[0].toolCallId, "edit-1");

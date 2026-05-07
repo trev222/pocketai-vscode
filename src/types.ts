@@ -103,6 +103,7 @@ export type HarnessPendingApproval = {
   toolCallId: string;
   toolType: string;
   filePath: string;
+  commandRisk?: string;
 };
 
 export type HarnessPendingDiff = {

@@ -935,7 +935,7 @@ export function getChatScript(brandIconUri: string): string {
           note = "PocketAI wants to look up current information before it answers.";
           break;
         case "run_command":
-          const commandRisk = classifyShellCommandRisk(toolCall?.command || "");
+          const commandRisk = approval?.commandRisk || "caution";
           title = "Allow running this " + formatCommandRiskLabel(commandRisk) + " command?";
           subject = toolCall?.command || subject;
           note = getCommandRiskNote(commandRisk);
@@ -978,7 +978,7 @@ export function getChatScript(brandIconUri: string): string {
         detailBits.push(queuedCount + " more queued");
       }
       if (type === "run_command") {
-        detailBits.push("risk: " + formatCommandRiskLabel(classifyShellCommandRisk(toolCall?.command || "")));
+        detailBits.push("risk: " + formatCommandRiskLabel(approval?.commandRisk || "caution"));
       }
       if (diffReady) {
         detailBits.push("diff ready");
@@ -992,34 +992,6 @@ export function getChatScript(brandIconUri: string): string {
         detail: detailBits.join(" · "),
         diffReady,
       };
-    }
-
-    function classifyShellCommandRisk(command) {
-      const normalized = String(command || "").trim().replace(/\s+/g, " ");
-      if (!normalized) return "caution";
-      if (/(?:^|[\\s;&|()])(?:rm\\s+-[^\\n]*[rf]|rm\\s+[^-\\n]|\\bsudo\\b|\\bchmod\\b|\\bchown\\b|\\bdd\\b|\\bmkfs\\b|\\bgit\\s+reset\\b|\\bgit\\s+checkout\\b|\\bgit\\s+clean\\b|\\bgit\\s+push\\b|\\bkill(?:all)?\\b|\\bpkill\\b)/.test(normalized)) {
-        return "destructive";
-      }
-      if (/\\b(?:npm|pnpm|yarn|bun)\\s+(?:install|add|dlx|create|upgrade|update)\\b|\\b(?:curl|wget|ssh|scp|rsync|gh\\s+repo|git\\s+(?:clone|pull|fetch|push))\\b/.test(normalized)) {
-        return "network";
-      }
-      if (/\\b(?:npm|pnpm|yarn|bun)\\s+run\\s+(?:dev|serve|start|watch)\\b|\\b(?:vite|next\\s+dev|webpack\\s+serve|tail\\s+-f)\\b/.test(normalized)) {
-        return "long-running";
-      }
-      if (/(?:^|[\\s;&|()])(?:mv\\b|cp\\b|mkdir\\b|touch\\b|tee\\b|sed\\s+-i\\b|python(?:3)?\\s+-c\\b|node\\s+-e\\b)|(?:^|[^<])>{1,2}(?!>)/.test(normalized)) {
-        return "writes";
-      }
-      if (/^(?:npm|pnpm|yarn|bun)\\s+(?:test|run\\s+(?:test|typecheck|lint|build)\\b)/.test(normalized) ||
-        /^npx\\s+(?:tsc|eslint|prettier)\\b/.test(normalized) ||
-        /^node\\s+--test\\b/.test(normalized) ||
-        /^cargo\\s+(?:test|check|clippy|fmt\\s+--check)\\b/.test(normalized) ||
-        /^go\\s+test\\b/.test(normalized) ||
-        /^(?:pytest|ruff\\s+check|mypy)\\b/.test(normalized) ||
-        /^git\\s+(?:status|diff|log|show|branch\\s+--show-current)\\b/.test(normalized) ||
-        /^(?:pwd|date|whoami|uname)(?:\\s|$)/.test(normalized)) {
-        return "safe";
-      }
-      return "caution";
     }
 
     function formatCommandRiskLabel(risk) {

@@ -9,6 +9,7 @@ import type {
   HarnessTodoItem,
   ToolCall,
 } from "../types";
+import { classifyShellCommandRisk } from "./policy";
 import type { HarnessEvent } from "./types";
 
 const MAX_BACKGROUND_TASKS = 20;
@@ -39,10 +40,12 @@ export function applyHarnessEventToSession(
       return;
     case "tool_call_pending_approval":
       if (!event.toolCallId) return;
+      const pendingToolCall = findToolCall(session, event.toolCallId);
       upsertPendingApproval(session, {
         toolCallId: event.toolCallId,
         toolType: event.detail || "tool",
-        filePath: findToolCall(session, event.toolCallId)?.filePath || "",
+        filePath: pendingToolCall?.filePath || "",
+        ...buildPendingApprovalCommandRisk(pendingToolCall),
       });
       return;
     case "change_set_ready":
@@ -90,6 +93,7 @@ export function syncHarnessPendingState(session: ChatSession) {
         toolCallId: toolCall.id,
         toolType: toolCall.type,
         filePath: toolCall.filePath,
+        ...buildPendingApprovalCommandRisk(toolCall),
       });
       if (toolCall.type === "edit_file" && toolCall.filePath) {
         pendingDiffs.push({
@@ -114,6 +118,15 @@ export function syncHarnessPendingState(session: ChatSession) {
     changeSetId: findChangeSetIdForToolCall(session, diff.toolCallId),
   }));
   session.harnessState.todoItems = extractTodoItems(session);
+}
+
+function buildPendingApprovalCommandRisk(
+  toolCall: ToolCall | undefined,
+): Pick<HarnessPendingApproval, "commandRisk"> | Record<string, never> {
+  if (toolCall?.type !== "run_command") return {};
+  return {
+    commandRisk: classifyShellCommandRisk(toolCall.command || ""),
+  };
 }
 
 export function clearPendingToolState(
