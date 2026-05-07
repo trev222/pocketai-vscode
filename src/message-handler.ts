@@ -303,6 +303,17 @@ export function setupChatMessageHandler(
           return;
         }
 
+        case "openChangeSet": {
+          const session = deps.sessionMgr.requireSession(sessionId);
+          if (!session) return;
+          await deps.diffViewer.openDiffsForChangeSet(
+            session,
+            message.changeSetId,
+            deps.outputChannel,
+          );
+          return;
+        }
+
         case "openFile": {
           const workspaceFolders = vscode.workspace.workspaceFolders;
           if (!workspaceFolders?.length) return;

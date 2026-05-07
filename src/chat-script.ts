@@ -1863,10 +1863,18 @@ export function getChatScript(brandIconUri: string): string {
             " / " + toolCount + " tool" + (toolCount === 1 ? "" : "s");
           row.appendChild(meta);
 
-          if (changeSet.status === "pending" || changeSet.status === "partially_applied") {
-            const actions = document.createElement("div");
-            actions.className = "harness-card-actions";
+          const actions = document.createElement("div");
+          actions.className = "harness-card-actions";
 
+          const viewBtn = document.createElement("button");
+          viewBtn.className = "tool-btn";
+          viewBtn.textContent = "View Set";
+          viewBtn.disabled = !!payload.busy;
+          viewBtn.onclick = () =>
+            vscode.postMessage({ type: "openChangeSet", changeSetId: changeSet.id });
+          actions.appendChild(viewBtn);
+
+          if (changeSet.status === "pending" || changeSet.status === "partially_applied") {
             const approveBtn = document.createElement("button");
             approveBtn.className = "tool-btn tool-btn-approve";
             approveBtn.textContent = "Approve Set";
@@ -1883,8 +1891,9 @@ export function getChatScript(brandIconUri: string): string {
               vscode.postMessage({ type: "rejectChangeSet", changeSetId: changeSet.id });
             actions.appendChild(rejectBtn);
 
-            row.appendChild(actions);
           }
+
+          row.appendChild(actions);
 
           list.appendChild(row);
         }

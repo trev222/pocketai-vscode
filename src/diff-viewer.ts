@@ -33,19 +33,54 @@ export class DiffViewer {
   ) {
     this.ensureDiffProvider();
 
-    let targetTc: ToolCall | undefined;
+    const targetTc = this.findPreviewableToolCall(session, toolCallId);
+    if (!targetTc) return;
+
+    await this.openDiffForToolCallPreview(session, targetTc, outputChannel);
+  }
+
+  async openDiffsForChangeSet(
+    session: ChatSession,
+    changeSetId: string,
+    outputChannel: vscode.OutputChannel,
+  ) {
+    this.ensureDiffProvider();
+
+    const changeSet = session.harnessState.changeSets.find(
+      (item) => item.id === changeSetId,
+    );
+    if (!changeSet) return;
+
+    for (const toolCallId of changeSet.toolCallIds) {
+      const toolCall = this.findPreviewableToolCall(session, toolCallId);
+      if (!toolCall) continue;
+      await this.openDiffForToolCallPreview(session, toolCall, outputChannel);
+    }
+  }
+
+  private findPreviewableToolCall(
+    session: ChatSession,
+    toolCallId: string,
+  ): ToolCall | undefined {
     for (const entry of session.transcript) {
       if (!entry.toolCalls) continue;
       for (const tc of entry.toolCalls) {
-        if (tc.id === toolCallId && tc.type === "edit_file") {
-          targetTc = tc;
-          break;
+        if (
+          tc.id === toolCallId &&
+          (tc.type === "edit_file" || tc.type === "write_file")
+        ) {
+          return tc;
         }
       }
-      if (targetTc) break;
     }
-    if (!targetTc) return;
+    return undefined;
+  }
 
+  private async openDiffForToolCallPreview(
+    session: ChatSession,
+    targetTc: ToolCall,
+    outputChannel: vscode.OutputChannel,
+  ) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders?.length) return;
     const rootPath = getSessionWorkspaceRoot(session) || workspaceFolders[0].uri.fsPath;
@@ -53,10 +88,10 @@ export class DiffViewer {
     if (!isInsidePath(rootPath, fullPath)) return;
 
     try {
-      const original = fs.readFileSync(fullPath, "utf-8");
-      const modified = targetTc.search
-        ? original.replace(targetTc.search, targetTc.replace || "")
-        : original;
+      const original = fs.existsSync(fullPath)
+        ? fs.readFileSync(fullPath, "utf-8")
+        : "";
+      const modified = this.buildModifiedContent(original, targetTc);
 
       if (this.diffContents.size > 20) {
         const keys = Array.from(this.diffContents.keys());
@@ -78,10 +113,23 @@ export class DiffViewer {
         "vscode.diff",
         originalUri,
         modifiedUri,
-        `Edit: ${targetTc.filePath}`,
+        `${targetTc.type === "write_file" ? "Write" : "Edit"}: ${targetTc.filePath}`,
       );
     } catch (e) {
       outputChannel.appendLine(`Diff error: ${(e as Error).message}`);
     }
+  }
+
+  private buildModifiedContent(original: string, toolCall: ToolCall): string {
+    if (toolCall.type === "write_file") {
+      return toolCall.content || "";
+    }
+    if (!toolCall.search) {
+      return original;
+    }
+    if (toolCall.replaceAll) {
+      return original.split(toolCall.search).join(toolCall.replace || "");
+    }
+    return original.replace(toolCall.search, toolCall.replace || "");
   }
 }

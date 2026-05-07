@@ -371,6 +371,7 @@ export type WebviewToExtensionMessage =
   | { type: "forkFromMessage"; messageIndex: number }
   | { type: "resolveAtMention"; query: string }
   | { type: "openDiff"; toolCallId: string }
+  | { type: "openChangeSet"; changeSetId: string }
   | { type: "approveAllToolCalls" }
   | { type: "rejectAllToolCalls" }
   | { type: "approveChangeSet"; changeSetId: string }
