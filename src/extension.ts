@@ -1354,9 +1354,48 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
     await this.sessionMgr.saveState();
     this.postState();
 
-    if (!session.busy) {
+    if (!session.busy && !this.hasPendingToolApprovals(session)) {
       this.continueAfterToolResults(session);
     }
+  }
+
+  private async handleChangeSetApproval(
+    sessionId: string,
+    changeSetId: string,
+    approved: boolean,
+  ) {
+    const session = this.sessionMgr.requireSession(sessionId);
+    if (!session) return;
+
+    const changeSet = session.harnessState.changeSets.find(
+      (item) => item.id === changeSetId,
+    );
+    if (!changeSet) return;
+
+    for (const toolCallId of changeSet.toolCallIds) {
+      const resolved = findToolCallInTranscript(session.transcript, toolCallId);
+      if (!resolved?.toolCall || resolved.toolCall.status !== "pending") {
+        continue;
+      }
+      this.inlineDiffMgr.clearChange(toolCallId);
+      await this.applyToolApprovalDecision(session, resolved.toolCall, approved);
+    }
+
+    this.sessionMgr.touchSession(session);
+    await this.sessionMgr.saveState();
+    this.postState();
+
+    if (!session.busy && !this.hasPendingToolApprovals(session)) {
+      this.continueAfterToolResults(session);
+    }
+  }
+
+  private hasPendingToolApprovals(
+    session: NonNullable<ReturnType<SessionManager["requireSession"]>>,
+  ): boolean {
+    return session.transcript.some((entry) =>
+      entry.toolCalls?.some((tc) => tc.status === "pending"),
+    );
   }
 
   private async rememberToolPermission(
@@ -1768,6 +1807,8 @@ class PocketAIViewProvider implements vscode.WebviewViewProvider {
         this.rememberToolPermission(sid, tcId, decision, scope),
       handleBatchToolApproval: (sid, approved) =>
         this.handleBatchToolApproval(sid, approved),
+      handleChangeSetApproval: (sid, changeSetId, approved) =>
+        this.handleChangeSetApproval(sid, changeSetId, approved),
       refreshModels: (sessionId) => {
         const session = sessionId
           ? this.sessionMgr.requireSession(sessionId)

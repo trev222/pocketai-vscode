@@ -54,6 +54,11 @@ export interface MessageHandlerDeps {
     sessionId: string,
     approved: boolean,
   ) => Promise<void>;
+  handleChangeSetApproval: (
+    sessionId: string,
+    changeSetId: string,
+    approved: boolean,
+  ) => Promise<void>;
   refreshModels: (sessionId?: string) => Promise<void>;
   selectEndpoint: (sessionId: string, endpointUrl: string) => Promise<void>;
   supportsReasoningEffort: (sessionId: string) => boolean;
@@ -188,6 +193,14 @@ export function setupChatMessageHandler(
 
         case "rejectAllToolCalls":
           await deps.handleBatchToolApproval(sessionId, false);
+          return;
+
+        case "approveChangeSet":
+          await deps.handleChangeSetApproval(sessionId, message.changeSetId, true);
+          return;
+
+        case "rejectChangeSet":
+          await deps.handleChangeSetApproval(sessionId, message.changeSetId, false);
           return;
 
         case "cancelRequest": {

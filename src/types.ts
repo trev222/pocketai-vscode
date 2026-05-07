@@ -373,6 +373,8 @@ export type WebviewToExtensionMessage =
   | { type: "openDiff"; toolCallId: string }
   | { type: "approveAllToolCalls" }
   | { type: "rejectAllToolCalls" }
+  | { type: "approveChangeSet"; changeSetId: string }
+  | { type: "rejectChangeSet"; changeSetId: string }
   | { type: "openFile"; filePath: string }
   | { type: "openExternal"; url: string }
   | { type: "removeActiveSkill"; skillId: string }
