@@ -793,6 +793,8 @@ test("policy helpers classify risk and approvals conservatively", () => {
   assert.equal(classifyShellCommandRisk("npm install left-pad"), "network");
   assert.equal(classifyShellCommandRisk("rm -rf dist"), "destructive");
   assert.equal(classifyShellCommandRisk("npm run dev"), "long-running");
+  assert.equal(classifyShellCommandRisk("echo hello > out.txt"), "writes");
+  assert.equal(classifyShellCommandRisk("mkdir dist"), "writes");
   assert.equal(
     getToolApprovalDecision("ask", codeActionCall, { approvalPolicy: "mode-auto" }),
     "requires-approval",

@@ -27,7 +27,8 @@ export type ShellCommandRisk =
   | "caution"
   | "destructive"
   | "long-running"
-  | "network";
+  | "network"
+  | "writes";
 
 const SAFE_COMMAND_PATTERNS = [
   /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|lint|build)\b)/,
@@ -49,12 +50,16 @@ const LONG_RUNNING_COMMAND_PATTERN =
 const DESTRUCTIVE_COMMAND_PATTERN =
   /(?:^|[\s;&|()])(?:rm\s+-[^\n]*[rf]|rm\s+[^-\n]|\bsudo\b|\bchmod\b|\bchown\b|\bdd\b|\bmkfs\b|\bgit\s+reset\b|\bgit\s+checkout\b|\bgit\s+clean\b|\bgit\s+push\b|\bkill(?:all)?\b|\bpkill\b)/;
 
+const WRITE_COMMAND_PATTERN =
+  /(?:^|[\s;&|()])(?:mv\b|cp\b|mkdir\b|touch\b|tee\b|sed\s+-i\b|python(?:3)?\s+-c\b|node\s+-e\b)|(?:^|[^<])>{1,2}(?!>)/;
+
 export function classifyShellCommandRisk(command: string): ShellCommandRisk {
   const normalized = command.trim().replace(/\s+/g, " ");
   if (!normalized) return "caution";
   if (DESTRUCTIVE_COMMAND_PATTERN.test(normalized)) return "destructive";
   if (NETWORK_COMMAND_PATTERN.test(normalized)) return "network";
   if (LONG_RUNNING_COMMAND_PATTERN.test(normalized)) return "long-running";
+  if (WRITE_COMMAND_PATTERN.test(normalized)) return "writes";
   if (SAFE_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return "safe";
   }
