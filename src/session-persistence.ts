@@ -52,14 +52,33 @@ export function restoreSessionFromPersistence(
 } {
   const hadRunningBackgroundTasks =
     session.backgroundTasks?.some((task) => task.status === "running") ?? false;
+  const restoredBackgroundTasks = restorePersistedBackgroundTasks(
+    session.backgroundTasks,
+  );
+  const transcript = [...session.transcript];
+  const interruptedCount = restoredBackgroundTasks.filter(
+    (task) => task.status === "interrupted",
+  ).length;
+
+  if (hadRunningBackgroundTasks && interruptedCount) {
+    transcript.push({
+      role: "tool",
+      content: buildRestoredSessionNotice(interruptedCount),
+    });
+  }
 
   return {
     hadRunningBackgroundTasks,
     session: {
       ...session,
+      transcript,
       selectedReasoningEffort:
         (session as ChatSession).selectedReasoningEffort ?? "",
       worktreeRoot: (session as ChatSession).worktreeRoot ?? "",
+      status:
+        hadRunningBackgroundTasks && interruptedCount
+          ? `${interruptedCount} background command${interruptedCount === 1 ? " was" : "s were"} interrupted while PocketAI was closed.`
+          : session.status,
       busy: false,
       checkpoints: [],
       cumulativeTokens:
@@ -70,11 +89,18 @@ export function restoreSessionFromPersistence(
       activeSkills: [],
       harnessState: {
         ...createEmptyHarnessSessionState(),
-        backgroundTasks: restorePersistedBackgroundTasks(session.backgroundTasks),
+        backgroundTasks: restoredBackgroundTasks,
         subagentTasks: [],
       },
     },
   };
+}
+
+export function buildRestoredSessionNotice(interruptedCount: number): string {
+  return [
+    `PocketAI restored this chat after reload. ${interruptedCount} background command${interruptedCount === 1 ? " was" : "s were"} still running before shutdown and ${interruptedCount === 1 ? "is" : "are"} now marked interrupted.`,
+    "Use `/jobs` to inspect preserved output, `/jobs rerun <taskId>` to rerun a command, or `/compact` before continuing a large restored chat.",
+  ].join("\n");
 }
 
 export function restorePersistedBackgroundTasks(

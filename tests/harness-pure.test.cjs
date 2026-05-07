@@ -1237,6 +1237,9 @@ test("session persistence strips large payloads and restores interrupted jobs sa
   const restored = restoreSessionFromPersistence(persisted);
   assert.equal(restored.hadRunningBackgroundTasks, true);
   assert.equal(restored.session.busy, false);
+  assert.match(restored.session.status, /1 background command was interrupted/);
+  assert.match(restored.session.transcript.at(-1).content, /PocketAI restored this chat/);
+  assert.match(restored.session.transcript.at(-1).content, /\/jobs rerun/);
   assert.equal(restored.session.worktreeRoot, "/tmp/project/.pocketai/worktrees/feature-a");
   assert.equal(restored.session.activeSkills.length, 0);
   assert.equal(restored.session.harnessState.backgroundTasks[1].status, "interrupted");
